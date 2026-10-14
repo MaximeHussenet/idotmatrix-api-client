@@ -39,6 +39,8 @@
       <button data-mode="bart" onclick="api('/bart/start', {interval_s:+$('bartInt').value}).then(bartRefresh)">🚇 BART map</button>
       <button data-mode="planes" onclick="planesStart()">✈️ Planes</button>
       <button data-mode="photos" onclick="photosStart()">📷 Photos</button>
+      <button data-mode="spotify" onclick="api('/spotify/start').then(spotifyRefresh)">🎵 Spotify</button>
+      <button data-mode="saver" onclick="saverStart()">🌀 Saver</button>
       <button data-mode="clock" onclick="api('/clock', {style:+$('clockStyle').value, color:$('clockColor').value})">🕐 Clock</button>
       <button data-mode="effect" onclick="api('/effect', {style:+$('fxStyle').value})">✨ Effect</button>
       <button data-mode="text" onclick="sendText()">📝 Text</button>
@@ -197,6 +199,41 @@
       <img id="phPreview" width="192" height="192" style="image-rendering:pixelated;border-radius:6px;border:1px solid #2c3540" alt="">
     </div>
     <div class="row"><label>Random pixelized pictures from a local folder (e.g. your Instagram data export) — shuffled, no repeats until the library cycles.</label></div>
+  </div>
+
+  <div class="card">
+    <h2>🎵 Now Playing (Spotify)</h2>
+    <div class="row">
+      <button class="primary" onclick="api('/spotify/start').then(spotifyRefresh)">Start</button>
+      <button onclick="api('/spotify/stop').then(spotifyRefresh)">Stop</button>
+      <span id="spStatus" style="color:var(--muted);font-size:12px">—</span>
+    </div>
+    <div class="row">
+      <img id="spPreview" width="192" height="192" style="image-rendering:pixelated;border-radius:6px;border:1px solid #2c3540" alt="">
+    </div>
+    <div class="row"><label>Album art + track/artist + progress bar from the Spotify desktop app (AppleScript — no API keys). Updates on track change, progress every 15s.</label></div>
+  </div>
+
+  <div class="card">
+    <h2>🌀 Screensaver</h2>
+    <div class="row">
+      <button class="primary" onclick="saverStart()">Start</button>
+      <button onclick="api('/saver/stop').then(saverRefresh)">Stop</button>
+      <span id="svStatus" style="color:var(--muted);font-size:12px">—</span>
+    </div>
+    <div class="row">
+      <select id="svStyle">
+        <option value="pipes">pipes (Win98)</option>
+        <option value="life">game of life</option>
+        <option value="mystify">mystify</option>
+      </select>
+      <label>New loop every</label>
+      <input type="number" id="svCycle" min="30" max="86400" value="240" style="width:64px"> s
+    </div>
+    <div class="row">
+      <img id="svPreview" width="192" height="192" style="image-rendering:pixelated;border-radius:6px;border:1px solid #2c3540" alt="">
+    </div>
+    <div class="row"><label>Looping animation uploaded once as a GIF — the panel plays it by itself, no BLE traffic between refreshes.</label></div>
   </div>
 
   <div class="card" style="grid-column:1/-1">
@@ -383,6 +420,35 @@ async function photosRefresh() {
 }
 photosRefresh();
 setInterval(photosRefresh, 10000);
+
+// ---- spotify mode ----
+async function spotifyRefresh() {
+  try {
+    const s = await (await fetch('/spotify/status')).json();
+    $('spStatus').textContent =
+      (s.running ? `${s.state || '…'}${s.track ? ` · ${s.track} — ${s.artist}` : ''}` : 'stopped') +
+      (s.last_error ? ` · ⚠ ${s.last_error}` : '');
+    if (s.running && s.last_update) $('spPreview').src = '/spotify/frame.png?t=' + s.last_update;
+  } catch {}
+}
+spotifyRefresh();
+setInterval(spotifyRefresh, 8000);
+
+// ---- saver mode ----
+function saverStart() {
+  api('/saver/start', { style: $('svStyle').value, cycle_s: +$('svCycle').value }).then(saverRefresh);
+}
+async function saverRefresh() {
+  try {
+    const s = await (await fetch('/saver/status')).json();
+    $('svStatus').textContent =
+      (s.running ? `running · ${s.style}` : 'stopped') +
+      (s.last_error ? ` · ⚠ ${s.last_error}` : '');
+    if (s.running && s.last_update) $('svPreview').src = '/saver/preview.gif?t=' + s.last_update;
+  } catch {}
+}
+saverRefresh();
+setInterval(saverRefresh, 15000);
 
 // ---- populate enums ----
 (async () => {

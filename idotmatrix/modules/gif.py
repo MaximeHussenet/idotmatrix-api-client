@@ -85,6 +85,21 @@ class GifModule(IDotMatrixModule):
         )
         await self._send_packets(packets=packets, response=True)
 
+    async def upload_gif_data(self, gif_data: bytes | bytearray, time_sign: int = 1) -> None:
+        """
+        Uploads ready-made GIF bytes as-is (no resizing, no frame limiting).
+
+        Use this when the GIF was generated at the device's native size with
+        a deliberate frame count/duration — upload_gif_file would re-process
+        it and may drop frames to fit its total-duration heuristic.
+        """
+        packets = self.create_gif_data_packets(
+            gif_data=bytes(gif_data),
+            gif_type=12,  # same as upload_gif_file
+            time_sign=time_sign,
+        )
+        await self._send_packets(packets=packets, response=True)
+
     @staticmethod
     def _convert_device_material_time(input_key: int) -> int:
         """

@@ -70,7 +70,8 @@ display = {"mode": None, "detail": None}
 
 
 def claim_display(mode: Optional[str], detail: Optional[str] = None) -> None:
-    for name, state in (("bart", _bart), ("planes", _planes), ("photos", _photos)):
+    for name, state in (("bart", _bart), ("planes", _planes), ("photos", _photos),
+                        ("spotify", _spotify), ("saver", _saver)):
         if name == mode:
             continue
         task = state["task"]
@@ -852,6 +853,195 @@ async def _photos_autostart():
     if os.environ.get("IDM_PHOTOS_AUTOSTART") == "1":
         log.info("IDM_PHOTOS_AUTOSTART=1 — starting photo slideshow")
         await photos_start(PhotosStartBody())
+
+
+# ---------------------------------------------------------------- spotify mode
+
+_spotify = {"mode": None, "task": None, "poll": 3, "repush": 15}
+
+
+class SpotifyStartBody(BaseModel):
+    poll_s: Optional[int] = None    # how often to ask Spotify for state
+    repush_s: Optional[int] = None  # progress-bar refresh while playing
+
+
+async def _spotify_loop():
+    mode = _spotify["mode"]
+    last_push = 0.0
+    while True:
+        try:
+            changed = await asyncio.to_thread(mode.poll)
+            due = time.time() - last_push >= _spotify["repush"]
+            if changed or (mode.state == "playing" and due):
+                frame = await asyncio.to_thread(mode.render)
+                await _push_pil_image(frame, timeout=120)
+                last_push = time.time()
+                log.info("spotify frame pushed: %s — %s (%s)",
+                         mode.track or "-", mode.artist or "-", mode.state)
+            delay = _spotify["poll"]
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            mode.last_error = f"{type(exc).__name__}: {exc}"
+            log.warning("spotify loop iteration failed: %s", mode.last_error)
+            delay = 10
+        await asyncio.sleep(delay)
+
+
+@app.post("/spotify/start")
+async def spotify_start(body: SpotifyStartBody = Body(default=SpotifyStartBody())):
+    from nowplaying import NowPlaying
+
+    poll_s = body.poll_s if body.poll_s is not None else 3
+    repush_s = body.repush_s if body.repush_s is not None else 15
+    if not 1 <= poll_s <= 60 or not 5 <= repush_s <= 300:
+        raise HTTPException(422, "poll_s must be 1-60, repush_s 5-300")
+    task = _spotify["task"]
+    if task is not None and not task.done():
+        task.cancel()
+    _spotify["mode"] = NowPlaying()
+    _spotify["poll"] = poll_s
+    _spotify["repush"] = repush_s
+    claim_display("spotify")
+    _spotify["task"] = asyncio.create_task(_spotify_loop())
+    return await spotify_status()
+
+
+@app.post("/spotify/stop")
+async def spotify_stop():
+    task = _spotify["task"]
+    if task is not None and not task.done():
+        task.cancel()
+    _spotify["task"] = None
+    if display["mode"] == "spotify":
+        display["mode"] = display["detail"] = None
+    return {"running": False}
+
+
+@app.get("/spotify/status")
+async def spotify_status():
+    mode = _spotify["mode"]
+    running = _spotify["task"] is not None and not _spotify["task"].done()
+    return {
+        "running": running,
+        "state": mode.state if mode else None,
+        "track": mode.track if mode else None,
+        "artist": mode.artist if mode else None,
+        "position": mode.position if mode else None,
+        "duration": mode.duration if mode else None,
+        "last_update": mode.last_update if mode else None,
+        "last_error": mode.last_error if mode else None,
+    }
+
+
+@app.get("/spotify/frame.png")
+async def spotify_frame_png():
+    mode = _spotify["mode"]
+    if mode is None or mode.last_frame is None:
+        raise HTTPException(404, "spotify mode has not rendered yet")
+    big = mode.last_frame.resize((SIZE * 6, SIZE * 6), resample=Image.NEAREST)
+    buf = io.BytesIO()
+    big.save(buf, format="PNG")
+    return Response(buf.getvalue(), media_type="image/png",
+                    headers={"Cache-Control": "no-store"})
+
+
+@app.on_event("startup")
+async def _spotify_autostart():
+    if os.environ.get("IDM_SPOTIFY_AUTOSTART") == "1":
+        log.info("IDM_SPOTIFY_AUTOSTART=1 — starting now-playing mode")
+        await spotify_start(SpotifyStartBody())
+
+
+# ---------------------------------------------------------------- saver mode
+
+_saver = {"mode": None, "task": None, "cycle": 240}
+
+
+class SaverStartBody(BaseModel):
+    style: Optional[str] = None     # pipes | life | mystify
+    cycle_s: Optional[int] = None   # new animation every N seconds
+    frames: Optional[int] = None
+    frame_ms: Optional[int] = None
+
+
+async def _saver_loop():
+    mode = _saver["mode"]
+    while True:
+        try:
+            gif = await asyncio.to_thread(mode.generate)
+            await run_on_device(lambda: client.gif.upload_gif_data(gif), timeout=300)
+            log.info("saver animation pushed: %s (%.1f KB)", mode.style, len(gif) / 1024)
+            delay = _saver["cycle"]
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            mode.last_error = f"{type(exc).__name__}: {exc}"
+            log.warning("saver loop iteration failed: %s", mode.last_error)
+            delay = 30
+        await asyncio.sleep(delay)
+
+
+@app.post("/saver/start")
+async def saver_start(body: SaverStartBody = Body(default=SaverStartBody())):
+    from saver import STYLES, Saver
+
+    style = body.style or "pipes"
+    cycle_s = body.cycle_s if body.cycle_s is not None else 240
+    frames = body.frames if body.frames is not None else 40
+    frame_ms = body.frame_ms if body.frame_ms is not None else 150
+    if style not in STYLES:
+        raise HTTPException(422, f"style must be one of {STYLES}")
+    if not 30 <= cycle_s <= 86400 or not 4 <= frames <= 64 or not 40 <= frame_ms <= 2000:
+        raise HTTPException(422, "cycle_s 30-86400, frames 4-64, frame_ms 40-2000")
+    task = _saver["task"]
+    if task is not None and not task.done():
+        task.cancel()
+    _saver["mode"] = Saver(style, frames, frame_ms)
+    _saver["cycle"] = cycle_s
+    claim_display("saver", style)
+    _saver["task"] = asyncio.create_task(_saver_loop())
+    return await saver_status()
+
+
+@app.post("/saver/stop")
+async def saver_stop():
+    task = _saver["task"]
+    if task is not None and not task.done():
+        task.cancel()
+    _saver["task"] = None
+    if display["mode"] == "saver":
+        display["mode"] = display["detail"] = None
+    return {"running": False}
+
+
+@app.get("/saver/status")
+async def saver_status():
+    mode = _saver["mode"]
+    running = _saver["task"] is not None and not _saver["task"].done()
+    return {
+        "running": running,
+        "style": mode.style if mode else None,
+        "cycle_s": _saver["cycle"],
+        "last_update": mode.last_update if mode else None,
+        "last_error": mode.last_error if mode else None,
+    }
+
+
+@app.get("/saver/preview.gif")
+async def saver_preview_gif():
+    mode = _saver["mode"]
+    if mode is None or mode.last_gif is None:
+        raise HTTPException(404, "saver mode has not generated yet")
+    return Response(mode.last_gif, media_type="image/gif",
+                    headers={"Cache-Control": "no-store"})
+
+
+@app.on_event("startup")
+async def _saver_autostart():
+    if os.environ.get("IDM_SAVER_AUTOSTART") == "1":
+        log.info("IDM_SAVER_AUTOSTART=1 — starting screensaver mode")
+        await saver_start(SaverStartBody(style=os.environ.get("IDM_SAVER_STYLE")))
 
 
 # ---------------------------------------------------------------- UI

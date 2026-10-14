@@ -11,7 +11,7 @@ Frame layout (64x64):
   line 1  callsign (yellow) | aircraft model right-aligned (white) — 4x6 font
   line 2  SFO > CDG centered (green) — classic 5x7 LED font
   middle  compass rose with outer N/E/S/W, arrow = the plane's current track
-  bottom  aircraft within ~5mi (left) | ground speed (right, pale blue) — 3x5
+  bottom  aircraft in the search radius (left) | speed (right, pale blue) — 3x5
 """
 
 import asyncio
@@ -32,8 +32,6 @@ ROUTE_URL = "https://api.adsbdb.com/v0/callsign/{cs}"
 ROUTE_RETRY_S = 900          # retry unknown routes after 15 min
 ROUTE_LOOKUPS_PER_REFRESH = 8
 MAX_PLANE_AGE_S = 60         # drop aircraft not seen for this long
-
-NEAR_NM = 4.34  # "within vicinity" = 5 statute miles
 
 C_CALLSIGN = (255, 210, 0)
 C_ROUTE = (0, 220, 120)
@@ -168,8 +166,9 @@ class PlanesOverhead:
             line2 = f"{route['o_iata']} > {route['d_iata']}" if route else "ROUTE ?"
             draw_text(img, (SIZE - (len(line2) * 6 - 1)) // 2, 9, line2, C_ROUTE, font="5x7")
             self._compass(img, p["track"])
-            near = sum(1 for q in self.planes if q["dst"] <= NEAR_NM)
-            draw_text(img, 1, 59, f"{near} AIRCRAFT", C_MUTED)
+            # count everything being cycled (the 5mi-only subset read as a
+            # frozen 0 — downtown SF often has zero planes that close)
+            draw_text(img, 1, 59, f"{len(self.planes)} AIRCRAFT", C_MUTED)
             if p["gs"] is not None:
                 speed = f"{p['gs']:.0f}KT"
                 draw_text(img, SIZE - len(speed) * 4, 59, speed, C_SPEED)
