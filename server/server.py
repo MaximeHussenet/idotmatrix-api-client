@@ -7,20 +7,24 @@ without the iDotMatrix iOS app.
 Run:  ./run.sh   (then open http://127.0.0.1:8588/ for the control panel)
 
 Env:
-  IDM_SIZE     16 | 32 | 64          (default 64)
-  IDM_ADDRESS  BLE address/UUID      (default: last connected, else discovery)
-  IDM_PORT     HTTP port             (default 8588, used by run.sh)
+  IDM_SIZE            16 | 32 | 64   (default 64)
+  IDM_ADDRESS         BLE address/UUID (default: last connected, else discovery)
+  IDM_PORT            HTTP port      (default 8588, used by run.sh)
+  IDM_BART_AUTOSTART  "1" = start the BART live map on boot (turn on and forget)
 """
 
 import asyncio
+import io
 import logging
 import os
 import tempfile
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
+from PIL import Image
+
 from fastapi import Body, FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 from idotmatrix.client import IDotMatrixClient
@@ -318,12 +322,27 @@ class CanvasBody(BaseModel):
     pixels: List[Color]
 
 
+def _pil_to_png(img: Image.Image) -> bytes:
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, format="PNG")
+    return buf.getvalue()
+
+
+async def _push_pil_image(img: Image.Image, timeout: float = 180) -> None:
+    """Send a PIL image as a DIY frame using the PNG protocol variant (the
+    raw-RGB variant only renders the first 4K chunk on this panel)."""
+    png = _pil_to_png(img)
+    await run_on_device(lambda: client.image.upload_png_data(png), timeout=timeout)
+
+
 @app.post("/canvas")
 async def canvas(body: CanvasBody):
     if len(body.pixels) != SIZE * SIZE:
         raise HTTPException(422, f"need exactly {SIZE * SIZE} pixels, got {len(body.pixels)}")
     data = [parse_color(c) for c in body.pixels]
-    await run_on_device(lambda: client.image.upload_image_pixeldata(data), timeout=120)
+    img = Image.new("RGB", (SIZE, SIZE))
+    img.putdata(data)
+    await _push_pil_image(img)
     return {"uploaded": len(data)}
 
 
@@ -391,10 +410,19 @@ async def image(
     else:
         raise HTTPException(422, "provide a multipart 'file' or a 'path' query param")
     try:
-        await run_on_device(
-            lambda: client.image.upload_image_file(src, resize_mode=resize_mode, palletize=palletize),
-            timeout=180,
-        )
+        from PIL import ImageOps
+        from idotmatrix.util import image_utils
+
+        with Image.open(src) as img:
+            img = ImageOps.exif_transpose(img)
+            resample = Image.Resampling.NEAREST if palletize else Image.Resampling.LANCZOS
+            img = image_utils.resize_image(
+                image=img, canvas_size=SIZE, resize_mode=resize_mode,
+                resample_mode=resample, mode="RGB",
+            )
+            if palletize:
+                img = image_utils.palettize(img)
+            await _push_pil_image(img)
     finally:
         if file is not None:
             src.unlink(missing_ok=True)
@@ -426,6 +454,94 @@ async def gif(
         if file is not None:
             src.unlink(missing_ok=True)
     return {"gif": file.filename if file else str(src), "resize": resize}
+
+
+# ---------------------------------------------------------------- BART mode
+
+_bart = {"mode": None, "task": None, "interval": 60}
+
+
+async def _get_bart_mode():
+    if _bart["mode"] is None:
+        from bartmap import BartMap
+
+        # first init downloads/parses GTFS — keep it off the event loop
+        _bart["mode"] = await asyncio.to_thread(BartMap)
+    return _bart["mode"]
+
+
+async def _bart_loop():
+    mode = _bart["mode"]
+    while True:
+        try:
+            frame = await mode.compute_frame()
+            await _push_pil_image(frame, timeout=120)
+            log.info("bart frame pushed: %d trains", mode.last_train_count)
+            delay = _bart["interval"]
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            mode.last_error = f"{type(exc).__name__}: {exc}"
+            log.warning("bart loop iteration failed: %s", mode.last_error)
+            delay = max(30, _bart["interval"] // 2)
+        await asyncio.sleep(delay)
+
+
+@app.on_event("startup")
+async def _bart_autostart():
+    if os.environ.get("IDM_BART_AUTOSTART") == "1":
+        log.info("IDM_BART_AUTOSTART=1 — starting BART live map")
+        await bart_start(BartStartBody())
+
+
+class BartStartBody(BaseModel):
+    interval_s: int = 60
+
+
+@app.post("/bart/start")
+async def bart_start(body: BartStartBody = Body(default=BartStartBody())):
+    if not 15 <= body.interval_s <= 3600:
+        raise HTTPException(422, "interval_s must be 15-3600")
+    await _get_bart_mode()
+    _bart["interval"] = body.interval_s
+    if _bart["task"] is None or _bart["task"].done():
+        _bart["task"] = asyncio.create_task(_bart_loop())
+    return await bart_status()
+
+
+@app.post("/bart/stop")
+async def bart_stop():
+    task = _bart["task"]
+    if task is not None and not task.done():
+        task.cancel()
+    _bart["task"] = None
+    return {"running": False}
+
+
+@app.get("/bart/status")
+async def bart_status():
+    mode = _bart["mode"]
+    running = _bart["task"] is not None and not _bart["task"].done()
+    return {
+        "running": running,
+        "interval_s": _bart["interval"],
+        "trains": mode.last_train_count if mode else None,
+        "last_update": mode.last_update if mode else None,
+        "last_error": mode.last_error if mode else None,
+    }
+
+
+@app.get("/bart/frame.png")
+async def bart_frame_png():
+    mode = await _get_bart_mode()
+    frame = mode.last_frame
+    if frame is None:
+        frame = await mode.compute_frame()
+    big = frame.resize((SIZE * 6, SIZE * 6), resample=Image.NEAREST)
+    buf = io.BytesIO()
+    big.save(buf, format="PNG")
+    return Response(buf.getvalue(), media_type="image/png",
+                    headers={"Cache-Control": "no-store"})
 
 
 # ---------------------------------------------------------------- UI

@@ -60,6 +60,36 @@ and the easiest way to render arbitrary frames programmatically.
 
 Enum values for text modes / clock styles / effects: `GET /enums`.
 
+## BART live map mode
+
+A fully-automated mode that renders the SF Bay Area (ocean/bay blue, urban
+grey, vegetation green, rest brown), the BART network in black, and **one dot
+per live train in its line color**, refreshed every minute.
+
+```bash
+curl -X POST localhost:8588/bart/start      # default 60s refresh
+curl -X POST localhost:8588/bart/start -d '{"interval_s":30}' -H 'Content-Type: application/json'
+curl -X POST localhost:8588/bart/stop
+curl localhost:8588/bart/status             # trains count, last update, errors
+open http://localhost:8588/bart/frame.png   # current frame preview (6x upscale)
+IDM_BART_AUTOSTART=1 ./run.sh               # turn on and forget
+```
+
+How it works (`server/bartmap/`):
+
+- `basemap.png` — 64x64 land-cover map generated once from OSM carto tiles by
+  `generate_basemap.py` (Web-Mercator frame defined in `geo.py`, majority-vote
+  classification per output pixel). Committed; regenerate only to change the
+  frame or palette.
+- Static GTFS from bart.gov (cached 30 days in `bartmap/cache/`) provides
+  station coordinates, trip stop sequences, track shapes (drawn black), and
+  official line colors.
+- GTFS-Realtime TripUpdates (api.bart.gov/gtfsrt) provide per-train predicted
+  stop times; each train is interpolated between its previous and next station
+  by prediction time (~1.3 km/pixel, so this is more than precise enough).
+- The render loop pushes full-color DIY frames and survives BLE drops and feed
+  hiccups (retries at half interval, min 30s).
+
 ## Keep it running (optional)
 
 ```bash

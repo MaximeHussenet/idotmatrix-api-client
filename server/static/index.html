@@ -113,6 +113,19 @@
     <div class="row"><label>PNG/JPG shows static, GIF animates. Scaled to panel size automatically.</label></div>
   </div>
 
+  <div class="card">
+    <h2>🚇 BART live map</h2>
+    <div class="row">
+      <button class="primary" onclick="api('/bart/start').then(bartRefresh)">Start</button>
+      <button onclick="api('/bart/stop').then(bartRefresh)">Stop</button>
+      <span id="bartStatus" style="color:var(--muted);font-size:12px">—</span>
+    </div>
+    <div class="row">
+      <img id="bartPreview" width="192" height="192" style="image-rendering:pixelated;border-radius:6px;border:1px solid #2c3540" alt="">
+    </div>
+    <div class="row"><label>Base map + BART lines, one dot per live train (line colors), refreshed every minute from BART GTFS-Realtime.</label></div>
+  </div>
+
   <div class="card" style="grid-column:1/-1">
     <h2>Pixel canvas</h2>
     <div class="row">
@@ -216,6 +229,20 @@ function pushCanvas() {
   note('pushing canvas…');
   api('/canvas', { pixels: px });
 }
+
+// ---- BART mode ----
+async function bartRefresh() {
+  try {
+    const s = await (await fetch('/bart/status')).json();
+    const when = s.last_update ? new Date(s.last_update * 1000).toLocaleTimeString() : 'never';
+    $('bartStatus').textContent =
+      (s.running ? `running · ${s.trains ?? '?'} trains · updated ${when}` : 'stopped') +
+      (s.last_error ? ` · ⚠ ${s.last_error}` : '');
+    if (s.last_update) $('bartPreview').src = '/bart/frame.png?t=' + s.last_update;
+  } catch {}
+}
+bartRefresh();
+setInterval(bartRefresh, 15000);
 
 // ---- populate enums ----
 (async () => {

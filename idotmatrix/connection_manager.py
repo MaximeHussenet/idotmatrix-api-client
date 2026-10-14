@@ -276,24 +276,29 @@ class ConnectionManager:
         for i, packet in enumerate(packets):
             for j, ble_paket in enumerate(packet):
                 self.logging.debug(f"sending packet {i + 1}.{j + 1} of {len(packets)}.{len(packets[-1])}")
-                wait_for_response = response if j == len(packet) - 1 else False
+                # When the caller requested a reliable transfer, write EVERY
+                # chunk with-response: the ATT-level ack paces the transfer to
+                # what the device can consume. Firing chunks without response
+                # back-to-back overruns the device buffer and it silently drops
+                # data mid-stream (symptom: only part of an image shows).
                 await self.client.write_gatt_char(
                     char_specifier=UUID_CHARACTERISTIC_WRITE_DATA,
                     data=ble_paket,
-                    response=wait_for_response
+                    response=response,
                 )
-                if wait_for_response:
-                    try:
-                        response_data = await self.client.read_gatt_char(UUID_READ_DATA)
-                        self.logging.debug(f"received response data: {response_data}")
-                    except BleakDBusError as e:
-                        if e.dbus_error == "org.bluez.Error.NotPermitted":
-                            pass
-                        else:
-                            self.logging.error(f"error while reading response data: {e}")
-                            # self.logging.warning("no response received, this is expected for some commands")
-                    except Exception as e:
+            if response:
+                try:
+                    response_data = await self.client.read_gatt_char(UUID_READ_DATA)
+                    self.logging.debug(f"received response data: {response_data}")
+                except BleakDBusError as e:
+                    if e.dbus_error == "org.bluez.Error.NotPermitted":
+                        pass
+                    else:
                         self.logging.error(f"error while reading response data: {e}")
+                except Exception as e:
+                    # some devices don't permit reading the response
+                    # characteristic at all — not an error for the upload
+                    self.logging.debug(f"could not read response data: {e}")
 
     async def get_max_bytes_per_chunk(self, response: bool) -> int:
         if response:

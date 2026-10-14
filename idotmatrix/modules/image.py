@@ -156,9 +156,33 @@ class ImageModule(IDotMatrixModule):
 
         return await self._send_diy_image_data(pixel_data)
 
+    async def upload_png_data(self, png_data: bytes | bytearray) -> None:
+        """
+        Uploads a PNG file as DIY image using the original protocol variant
+        (as implemented by derkalle4/python3-idotmatrix-library).
+
+        Some device firmwares only accept this PNG-based framing and silently
+        discard the continuation chunks of the raw-RGB framing used by
+        upload_image_pixeldata (symptom: only the first 4096 bytes — about a
+        third of a 64x64 frame — are displayed).
+        """
+        await self.set_mode(ImageMode.EnableDIY)
+        chunks = self.chunk_data_by_size(bytearray(png_data), CHUNK_SIZE_4096)
+        prefix = struct.pack("<h", len(png_data) + len(chunks))
+        png_len = struct.pack("<i", len(png_data))
+        packets = []
+        for i, chunk in enumerate(chunks):
+            payload = bytearray(prefix) + bytearray([0, 0, 2 if i > 0 else 0]) + bytearray(png_len) + chunk
+            packets.append(self._create_ble_packets(payload))
+        await self._send_packets(packets, response=True)
+
     async def _send_diy_image_data(
         self, pixel_data: bytearray,
     ) -> None:
+        # Switch the device into DIY mode first: without this the uploaded
+        # image is only shown transiently and the device reverts to its
+        # previously active mode (clock, text, ...) moments later.
+        await self.set_mode(ImageMode.EnableDIY)
         packets = self._create_diy_image_data_packets(pixel_data)
         await self._send_packets(packets, response=True)
 
