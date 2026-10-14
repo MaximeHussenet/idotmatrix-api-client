@@ -229,6 +229,8 @@
       </select>
       <label>New loop every</label>
       <input type="number" id="svCycle" min="30" max="86400" value="240" style="width:64px"> s
+      <label>Frame</label>
+      <input type="number" id="svFrameMs" min="40" max="2000" step="10" value="150" style="width:64px"> ms
     </div>
     <div class="row">
       <img id="svPreview" width="192" height="192" style="image-rendering:pixelated;border-radius:6px;border:1px solid #2c3540" alt="">
@@ -436,7 +438,9 @@ setInterval(spotifyRefresh, 8000);
 
 // ---- saver mode ----
 function saverStart() {
-  api('/saver/start', { style: $('svStyle').value, cycle_s: +$('svCycle').value }).then(saverRefresh);
+  api('/saver/start', {
+    style: $('svStyle').value, cycle_s: +$('svCycle').value, frame_ms: +$('svFrameMs').value,
+  }).then(saverRefresh);
 }
 async function saverRefresh() {
   try {
