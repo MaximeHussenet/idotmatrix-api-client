@@ -8,10 +8,9 @@ Data sources:
   airports). Cached per callsign; unknowns retried after a while.
 
 Frame layout (64x64, 3x5 font):
-  line 1  callsign (yellow, 1px taller) | aircraft model right-aligned (white)
-  line 2  origin city (IATA) TO        (green)
-  line 3  destination city (IATA)      (green)
-  middle  compass rose, arrow = the plane's current track
+  line 1  callsign (yellow, +1px) | aircraft model right-aligned (white, +1px)
+  line 2  SFO > CDG centered (green, +2px)
+  middle  compass rose with outer N/E/S/W, arrow = the plane's current track
   bottom  aircraft within ~5mi (left) | ground speed in KT (right, pale blue)
 """
 
@@ -44,7 +43,7 @@ C_COMPASS = (70, 75, 85)
 C_ARROW = (255, 210, 0)
 C_MUTED = (110, 115, 125)
 
-CMP_CX, CMP_CY, CMP_R = 32, 40, 15
+CMP_CX, CMP_CY, CMP_R = 32, 38, 12
 
 
 class PlanesOverhead:
@@ -120,12 +119,6 @@ class PlanesOverhead:
 
     # ------------------------------------------------------------ rendering
 
-    @staticmethod
-    def _airport_line(city: str, iata: str, suffix: str = "") -> str:
-        """'San Francisco', 'SFO' -> 'SAN FRAN (SFO)' truncated to 16 chars."""
-        tail = f" ({iata}){suffix}"
-        return city[: 16 - len(tail)].rstrip() + tail
-
     def _compass(self, img: Image.Image, track: float | None) -> None:
         draw = ImageDraw.Draw(img)
         # cardinal + intercardinal tick marks
@@ -138,7 +131,11 @@ class PlanesOverhead:
                  CMP_CX + round(sin * outer), CMP_CY - round(cos * outer)),
                 fill=C_COMPASS,
             )
-        draw_text(img, CMP_CX - 1, CMP_CY - CMP_R + 3, "N", C_MUTED)
+        # cardinal letters on the outer layer
+        draw_text(img, CMP_CX - 1, CMP_CY - CMP_R - 7, "N", C_MUTED)
+        draw_text(img, CMP_CX - 1, CMP_CY + CMP_R + 3, "S", C_MUTED)
+        draw_text(img, CMP_CX + CMP_R + 3, CMP_CY - 2, "E", C_MUTED)
+        draw_text(img, CMP_CX - CMP_R - 6, CMP_CY - 2, "W", C_MUTED)
         if track is None:
             draw_text(img, CMP_CX - 1, CMP_CY - 2, "?", C_MUTED)
             return
@@ -156,25 +153,22 @@ class PlanesOverhead:
     def render(self, featured: int) -> Image.Image:
         img = Image.new("RGB", (SIZE, SIZE))
         if not self.planes:
-            draw_text(img, 1, 1, "NO TRAFFIC", C_MUTED, tall=True)
+            draw_text(img, 1, 1, "NO TRAFFIC", C_MUTED, stretch=1)
             self._compass(img, None)
-            draw_text(img, 1, 59, "0", C_MUTED)
+            draw_text(img, 1, 59, "0 AIRCRAFT", C_MUTED)
             self.last_shown = None
         else:
             featured %= len(self.planes)
             p = self.planes[featured]
             route = self.routes.get(p["callsign"], (None, 0))[0]
-            draw_text(img, 1, 1, p["callsign"][:11], C_CALLSIGN, tall=True)
             model = p["type"][:4]
-            draw_text(img, SIZE - len(model) * 4, 2, model, C_INFO)
-            if route:
-                draw_text(img, 1, 10, self._airport_line(route["o_city"], route["o_iata"], " TO"), C_ROUTE)
-                draw_text(img, 1, 16, self._airport_line(route["d_city"], route["d_iata"]), C_ROUTE)
-            else:
-                draw_text(img, 1, 10, "ROUTE ?", C_ROUTE)
+            draw_text(img, 1, 1, p["callsign"][:10], C_CALLSIGN, stretch=1)
+            draw_text(img, SIZE - len(model) * 4, 1, model, C_INFO, stretch=1)
+            line2 = f"{route['o_iata']} > {route['d_iata']}" if route else "ROUTE ?"
+            draw_text(img, (SIZE - (len(line2) * 4 - 1)) // 2, 10, line2, C_ROUTE, stretch=2)
             self._compass(img, p["track"])
             near = sum(1 for q in self.planes if q["dst"] <= NEAR_NM)
-            draw_text(img, 1, 59, f"{near} ACFT", C_MUTED)
+            draw_text(img, 1, 59, f"{near} AIRCRAFT", C_MUTED)
             if p["gs"] is not None:
                 speed = f"{p['gs']:.0f}KT"
                 draw_text(img, SIZE - len(speed) * 4, 59, speed, C_SPEED)
