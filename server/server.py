@@ -322,17 +322,19 @@ class CanvasBody(BaseModel):
     pixels: List[Color]
 
 
-def _pil_to_png(img: Image.Image) -> bytes:
-    buf = io.BytesIO()
-    img.convert("RGB").save(buf, format="PNG")
-    return buf.getvalue()
-
-
 async def _push_pil_image(img: Image.Image, timeout: float = 180) -> None:
-    """Send a PIL image as a DIY frame using the PNG protocol variant (the
-    raw-RGB variant only renders the first 4K chunk on this panel)."""
-    png = _pil_to_png(img)
-    await run_on_device(lambda: client.image.upload_png_data(png), timeout=timeout)
+    """Send a PIL image as a single-frame GIF.
+
+    The GIF transport (sniffed-from-app protocol, CRC32 headers) is the only
+    multi-chunk upload this panel renders completely: both DIY framings (raw
+    RGB and PNG) drop everything past the first 4096-byte chunk."""
+    with tempfile.NamedTemporaryFile(suffix=".gif", delete=False) as f:
+        img.convert("RGB").save(f, format="GIF")
+        path = f.name
+    try:
+        await run_on_device(lambda: client.gif.upload_gif_file(path, palletize=True), timeout=timeout)
+    finally:
+        os.unlink(path)
 
 
 @app.post("/canvas")
