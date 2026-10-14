@@ -166,3 +166,4 @@ cython_debug/
 server/.device_address
 server/bartmap/cache/
 server/.planes_config
+server/.photos_config

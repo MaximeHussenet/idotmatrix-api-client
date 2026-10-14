@@ -70,7 +70,7 @@ display = {"mode": None, "detail": None}
 
 
 def claim_display(mode: Optional[str], detail: Optional[str] = None) -> None:
-    for name, state in (("bart", _bart), ("planes", _planes)):
+    for name, state in (("bart", _bart), ("planes", _planes), ("photos", _photos)):
         if name == mode:
             continue
         task = state["task"]
@@ -724,6 +724,134 @@ async def _planes_autostart():
     if os.environ.get("IDM_PLANES_AUTOSTART") == "1":
         log.info("IDM_PLANES_AUTOSTART=1 — starting planes overhead")
         await planes_start(PlanesStartBody())
+
+
+# ---------------------------------------------------------------- photos mode
+
+_photos = {"mode": None, "task": None, "rotate": 30}
+PHOTOS_CONFIG_FILE = BASE_DIR / ".photos_config"
+
+
+def _photos_defaults() -> dict:
+    cfg = {"dir": "~/Pictures/instagram", "rotate_s": 30, "colors": 0}
+    if PHOTOS_CONFIG_FILE.exists():
+        try:
+            import json
+
+            cfg.update(json.loads(PHOTOS_CONFIG_FILE.read_text()))
+        except Exception:
+            log.warning("ignoring unreadable %s", PHOTOS_CONFIG_FILE)
+    return cfg
+
+
+class PhotosStartBody(BaseModel):
+    dir: Optional[str] = None
+    rotate_s: Optional[int] = None
+    colors: Optional[int] = None  # 0 = full color, else quantize palette
+
+
+async def _photos_push_next():
+    mode = _photos["mode"]
+    frame = await asyncio.to_thread(mode.next_frame)
+    await _push_pil_image(frame, timeout=120)
+    log.info("photo pushed: %s (%d in library)", mode.last_shown, mode.total)
+
+
+async def _photos_loop():
+    mode = _photos["mode"]
+    while True:
+        try:
+            await _photos_push_next()
+            delay = _photos["rotate"]
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            mode.last_error = f"{type(exc).__name__}: {exc}"
+            log.warning("photos loop iteration failed: %s", mode.last_error)
+            delay = 15
+        await asyncio.sleep(delay)
+
+
+@app.post("/photos/start")
+async def photos_start(body: PhotosStartBody = Body(default=PhotosStartBody())):
+    from photos import PhotoShow
+
+    cfg = _photos_defaults()
+    for key in cfg:
+        value = getattr(body, key)
+        if value is not None:
+            cfg[key] = value
+    if not 5 <= cfg["rotate_s"] <= 86400:
+        raise HTTPException(422, "rotate_s must be 5-86400")
+    if not 0 <= cfg["colors"] <= 256:
+        raise HTTPException(422, "colors must be 0 (full) or 2-256")
+    folder = Path(cfg["dir"]).expanduser()
+    if not folder.is_dir():
+        raise HTTPException(404, f"no such folder: {folder}")
+
+    import json
+
+    PHOTOS_CONFIG_FILE.write_text(json.dumps(cfg))
+    task = _photos["task"]
+    if task is not None and not task.done():
+        task.cancel()
+    _photos["mode"] = PhotoShow(cfg["dir"], cfg["colors"])
+    _photos["rotate"] = cfg["rotate_s"]
+    claim_display("photos", f"every {cfg['rotate_s']}s")
+    _photos["task"] = asyncio.create_task(_photos_loop())
+    return await photos_status()
+
+
+@app.post("/photos/next")
+async def photos_next():
+    if _photos["mode"] is None or _photos["task"] is None or _photos["task"].done():
+        raise HTTPException(409, "photos mode is not running")
+    await _photos_push_next()
+    return await photos_status()
+
+
+@app.post("/photos/stop")
+async def photos_stop():
+    task = _photos["task"]
+    if task is not None and not task.done():
+        task.cancel()
+    _photos["task"] = None
+    if display["mode"] == "photos":
+        display["mode"] = display["detail"] = None
+    return {"running": False}
+
+
+@app.get("/photos/status")
+async def photos_status():
+    mode = _photos["mode"]
+    running = _photos["task"] is not None and not _photos["task"].done()
+    return {
+        "running": running,
+        "config": _photos_defaults(),
+        "library": mode.total if mode else None,
+        "showing": mode.last_shown if mode else None,
+        "last_update": mode.last_update if mode else None,
+        "last_error": mode.last_error if mode else None,
+    }
+
+
+@app.get("/photos/frame.png")
+async def photos_frame_png():
+    mode = _photos["mode"]
+    if mode is None or mode.last_frame is None:
+        raise HTTPException(404, "photos mode has not rendered yet")
+    big = mode.last_frame.resize((SIZE * 6, SIZE * 6), resample=Image.NEAREST)
+    buf = io.BytesIO()
+    big.save(buf, format="PNG")
+    return Response(buf.getvalue(), media_type="image/png",
+                    headers={"Cache-Control": "no-store"})
+
+
+@app.on_event("startup")
+async def _photos_autostart():
+    if os.environ.get("IDM_PHOTOS_AUTOSTART") == "1":
+        log.info("IDM_PHOTOS_AUTOSTART=1 — starting photo slideshow")
+        await photos_start(PhotosStartBody())
 
 
 # ---------------------------------------------------------------- UI

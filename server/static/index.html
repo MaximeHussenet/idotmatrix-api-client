@@ -38,6 +38,7 @@
     <div class="row">
       <button data-mode="bart" onclick="api('/bart/start', {interval_s:+$('bartInt').value}).then(bartRefresh)">🚇 BART map</button>
       <button data-mode="planes" onclick="planesStart()">✈️ Planes</button>
+      <button data-mode="photos" onclick="photosStart()">📷 Photos</button>
       <button data-mode="clock" onclick="api('/clock', {style:+$('clockStyle').value, color:$('clockColor').value})">🕐 Clock</button>
       <button data-mode="effect" onclick="api('/effect', {style:+$('fxStyle').value})">✨ Effect</button>
       <button data-mode="text" onclick="sendText()">📝 Text</button>
@@ -169,6 +170,33 @@
       <img id="planesPreview" width="192" height="192" style="image-rendering:pixelated;border-radius:6px;border:1px solid #2c3540" alt="">
     </div>
     <div class="row"><label>Callsign, route, type, altitude, speed + radar of nearby aircraft (adsb.lol + adsbdb). Cycles through planes when several are overhead.</label></div>
+  </div>
+
+  <div class="card">
+    <h2>📷 Photos</h2>
+    <div class="row">
+      <button class="primary" onclick="photosStart()">Start</button>
+      <button onclick="api('/photos/next').then(photosRefresh)">Next</button>
+      <button onclick="api('/photos/stop').then(photosRefresh)">Stop</button>
+      <span id="phStatus" style="color:var(--muted);font-size:12px">—</span>
+    </div>
+    <div class="row">
+      <label>Folder</label><input type="text" id="phDir" class="grow" placeholder="~/Pictures/instagram">
+    </div>
+    <div class="row">
+      <label>Rotate</label><input type="number" id="phRot" min="5" max="86400" style="width:64px"> s
+      <label>Palette</label>
+      <select id="phCol">
+        <option value="0">full color</option>
+        <option value="64">64 colors</option>
+        <option value="32">32 colors</option>
+        <option value="16">16 colors</option>
+      </select>
+    </div>
+    <div class="row">
+      <img id="phPreview" width="192" height="192" style="image-rendering:pixelated;border-radius:6px;border:1px solid #2c3540" alt="">
+    </div>
+    <div class="row"><label>Random pixelized pictures from a local folder (e.g. your Instagram data export) — shuffled, no repeats until the library cycles.</label></div>
   </div>
 
   <div class="card" style="grid-column:1/-1">
@@ -331,6 +359,30 @@ async function planesRefresh() {
 }
 planesRefresh();
 setInterval(planesRefresh, 8000);
+
+// ---- photos mode ----
+function photosStart() {
+  api('/photos/start', {
+    dir: $('phDir').value || null, rotate_s: +$('phRot').value || null, colors: +$('phCol').value,
+  }).then(photosRefresh);
+}
+let photosCfgLoaded = false;
+async function photosRefresh() {
+  try {
+    const s = await (await fetch('/photos/status')).json();
+    if (!photosCfgLoaded) {
+      photosCfgLoaded = true;
+      $('phDir').value = s.config.dir; $('phRot').value = s.config.rotate_s;
+      $('phCol').value = s.config.colors;
+    }
+    $('phStatus').textContent =
+      (s.running ? `running · ${s.library ?? '?'} pics · ${s.showing || '…'}` : 'stopped') +
+      (s.last_error ? ` · ⚠ ${s.last_error}` : '');
+    if (s.running && s.last_update) $('phPreview').src = '/photos/frame.png?t=' + s.last_update;
+  } catch {}
+}
+photosRefresh();
+setInterval(photosRefresh, 10000);
 
 // ---- populate enums ----
 (async () => {
