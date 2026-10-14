@@ -27,9 +27,13 @@ STYLES = ("snake", "life", "mystify")
 
 
 def _gif_bytes(frames: list[Image.Image], frame_ms: int) -> bytes:
+    # Mirror the settings of the library's known-good GIF path: palettized
+    # full frames + disposal=2. PIL's default delta-encoded partial frames
+    # render glitchy on the panel's GIF player.
+    frames = [f.convert("P", palette=Image.Palette.ADAPTIVE, colors=128) for f in frames]
     buf = io.BytesIO()
     frames[0].save(buf, format="GIF", save_all=True, append_images=frames[1:],
-                   duration=frame_ms, loop=0, optimize=True)
+                   duration=frame_ms, loop=0, optimize=True, disposal=2)
     return buf.getvalue()
 
 
@@ -45,7 +49,8 @@ def _snake_frames(n: int) -> list[Image.Image]:
     dx, dy = random.choice([(0, -1), (0, 1), (-1, 0), (1, 0)])
     hue = random.random()
     frames = []
-    for _ in range(n):
+    n_forward = n // 2 + 1  # palindrome below brings the total back to ~n
+    for _ in range(n_forward):
         for _ in range(12):  # steps per frame
             hue = (hue + 0.0025) % 1.0
             # candidates: straight, left, right (never reverse)
@@ -79,7 +84,9 @@ def _snake_frames(n: int) -> list[Image.Image]:
             img.putpixel(pos, color)
         img.putpixel((x, y), (255, 255, 255))  # head
         frames.append(img)
-    return frames
+    # Seamless loop: play forward then backward (the snake "retracts"), so
+    # the GIF never jump-cuts back to an empty canvas when it restarts.
+    return frames + frames[-2:0:-1]
 
 
 def _life_frames(n: int) -> list[Image.Image]:
