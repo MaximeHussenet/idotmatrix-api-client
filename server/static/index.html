@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>iDotMatrix Local</title>
+<style>
+  :root { --bg:#111417; --card:#1b2026; --fg:#e8eaed; --muted:#9aa3ad; --accent:#4da3ff; --ok:#3ecf72; --bad:#ff5d5d; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background:var(--bg); color:var(--fg); padding:16px; }
+  h1 { font-size:18px; margin:0 0 12px; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:0 0 10px; }
+  .grid { display:grid; gap:14px; grid-template-columns:repeat(auto-fit, minmax(300px, 1fr)); max-width:1200px; margin:0 auto; }
+  .card { background:var(--card); border-radius:10px; padding:14px; }
+  button { background:#2a3340; color:var(--fg); border:0; border-radius:7px; padding:8px 12px; cursor:pointer; font-size:13px; }
+  button:hover { background:#344050; }
+  button.primary { background:var(--accent); color:#06121f; font-weight:600; }
+  input[type=text], input[type=number], select { background:#10151a; color:var(--fg); border:1px solid #2c3540; border-radius:7px; padding:7px 9px; font-size:13px; }
+  input[type=color] { width:42px; height:34px; border:0; background:none; padding:0; cursor:pointer; }
+  input[type=range] { width:100%; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px; }
+  .row:last-child { margin-bottom:0; }
+  .dot { display:inline-block; width:9px; height:9px; border-radius:50%; background:var(--bad); margin-right:6px; }
+  .dot.on { background:var(--ok); }
+  #log { font:11px ui-monospace, monospace; color:var(--muted); max-width:1200px; margin:12px auto 0; white-space:pre-wrap; }
+  canvas { border:1px solid #2c3540; border-radius:6px; image-rendering:pixelated; touch-action:none; cursor:crosshair; }
+  .grow { flex:1; min-width:120px; }
+  label { color:var(--muted); font-size:12px; }
+</style>
+</head>
+<body>
+<h1>⚡ iDotMatrix Local <span id="sizeTag" style="color:var(--muted);font-weight:400"></span></h1>
+<div class="grid">
+
+  <div class="card">
+    <h2><span id="connDot" class="dot"></span>Connection</h2>
+    <div class="row">
+      <button id="scanBtn">Scan</button>
+      <select id="devices" class="grow"><option value="">— saved / auto —</option></select>
+    </div>
+    <div class="row">
+      <button class="primary" onclick="api('/connect', {address: document.getElementById('devices').value || null})">Connect</button>
+      <button onclick="api('/disconnect')">Disconnect</button>
+      <button onclick="api('/time/sync')">Sync time</button>
+    </div>
+    <div class="row">
+      <button onclick="api('/screen', {on:true})">On</button>
+      <button onclick="api('/screen', {on:false})">Off</button>
+      <button onclick="api('/screen/flip')">Flip</button>
+      <button onclick="api('/freeze')">Freeze</button>
+    </div>
+    <div class="row">
+      <label>Brightness</label>
+      <input type="range" id="bri" min="5" max="100" value="80"
+             onchange="api('/brightness', {percent:+this.value})">
+    </div>
+    <div class="row">
+      <label>Fullscreen color</label>
+      <input type="color" id="fsColor" value="#2266ff">
+      <button onclick="api('/color', {color: document.getElementById('fsColor').value})">Set</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Text</h2>
+    <div class="row"><input type="text" id="txt" class="grow" placeholder="Hello!" value="Hello!"></div>
+    <div class="row">
+      <select id="txtMode"></select>
+      <select id="txtColorMode"></select>
+      <input type="color" id="txtColor" value="#ffffff">
+    </div>
+    <div class="row">
+      <label>Size</label><input type="number" id="txtSize" value="16" min="4" max="64" style="width:64px">
+      <label>Speed</label><input type="number" id="txtSpeed" value="95" min="1" max="100" style="width:64px">
+      <button class="primary" onclick="sendText()">Send</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Clock &amp; Effects</h2>
+    <div class="row">
+      <select id="clockStyle"></select>
+      <input type="color" id="clockColor" value="#ffffff">
+      <button class="primary" onclick="api('/clock', {style:+document.getElementById('clockStyle').value, color:document.getElementById('clockColor').value})">Clock</button>
+    </div>
+    <div class="row">
+      <select id="fxStyle"></select>
+      <button onclick="api('/effect', {style:+document.getElementById('fxStyle').value})">Effect</button>
+    </div>
+    <div class="row">
+      <label>Countdown</label>
+      <input type="number" id="cdMin" value="5" min="0" max="99" style="width:56px"> m
+      <input type="number" id="cdSec" value="0" min="0" max="59" style="width:56px"> s
+      <button onclick="api('/countdown/start', {minutes:+cdMin.value, seconds:+cdSec.value})">Start</button>
+      <button onclick="api('/countdown/stop')">Stop</button>
+    </div>
+    <div class="row">
+      <label>Score</label>
+      <input type="number" id="scHome" value="0" min="0" style="width:56px"> :
+      <input type="number" id="scAway" value="0" min="0" style="width:56px">
+      <button onclick="api('/scoreboard', {home:+scHome.value, away:+scAway.value})">Show</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Image / GIF</h2>
+    <div class="row"><input type="file" id="imgFile" accept="image/*"></div>
+    <div class="row">
+      <select id="imgResize"><option>fit</option><option>fill</option><option>stretch</option></select>
+      <label><input type="checkbox" id="imgPal"> palletize</label>
+      <button class="primary" onclick="sendFile()">Upload</button>
+    </div>
+    <div class="row"><label>PNG/JPG shows static, GIF animates. Scaled to panel size automatically.</label></div>
+  </div>
+
+  <div class="card" style="grid-column:1/-1">
+    <h2>Pixel canvas</h2>
+    <div class="row">
+      <canvas id="cv" width="64" height="64" style="width:384px;height:384px"></canvas>
+      <div>
+        <div class="row">
+          <input type="color" id="cvColor" value="#ff4444">
+          <button onclick="cvErase=false">Draw</button>
+          <button onclick="cvErase=true">Erase</button>
+          <button onclick="cvClear()">Clear</button>
+        </div>
+        <div class="row"><button class="primary" onclick="pushCanvas()">Push to panel</button></div>
+        <div class="row"><label>Click/drag to paint, then push. Uses the DIY image mode (full 24-bit color).</label></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+<div id="log"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const logEl = $('log');
+function note(msg, bad) {
+  logEl.textContent = `${new Date().toLocaleTimeString()}  ${msg}\n` + logEl.textContent.split('\n').slice(0, 20).join('\n');
+  logEl.style.color = bad ? 'var(--bad)' : 'var(--muted)';
+}
+
+async function api(path, body, raw) {
+  try {
+    const opts = { method: 'POST' };
+    if (raw) { opts.body = raw; }
+    else if (body !== undefined) { opts.headers = {'Content-Type':'application/json'}; opts.body = JSON.stringify(body); }
+    const r = await fetch(path, opts);
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.detail || r.status);
+    note(`${path} ✓ ${JSON.stringify(j)}`);
+    refreshStatus();
+    return j;
+  } catch (e) { note(`${path} ✗ ${e.message}`, true); throw e; }
+}
+
+async function refreshStatus() {
+  try {
+    const s = await (await fetch('/status')).json();
+    $('connDot').className = 'dot' + (s.connected ? ' on' : '');
+    $('sizeTag').textContent = `${s.size}×${s.size}` + (s.address ? ` · ${s.address.slice(0,13)}…` : '');
+  } catch {}
+}
+
+$('scanBtn').onclick = async () => {
+  note('scanning… (≈10s)');
+  const j = await api('/scan');
+  const sel = $('devices');
+  sel.innerHTML = '<option value="">— saved / auto —</option>';
+  for (const d of j.devices) sel.add(new Option(d, d));
+  if (j.devices.length) sel.value = j.devices[0];
+  note(`found ${j.devices.length} device(s)`);
+};
+
+function sendText() {
+  const cm = $('txtColorMode').value;
+  api('/text', {
+    text: $('txt').value, font_size: +$('txtSize').value, speed: +$('txtSpeed').value,
+    mode: +$('txtMode').value,
+    color_mode: cm === 'RGB' ? 'RGB' : cm,
+    color: cm === 'RGB' ? $('txtColor').value : null,
+  });
+}
+
+async function sendFile() {
+  const f = $('imgFile').files[0];
+  if (!f) return note('pick a file first', true);
+  const fd = new FormData(); fd.append('file', f);
+  const isGif = /\.gif$/i.test(f.name);
+  const url = `/${isGif ? 'gif' : 'image'}?resize=${$('imgResize').value}` + (!isGif && $('imgPal').checked ? '&palletize=true' : '');
+  note(`uploading ${f.name}…`);
+  await api(url, undefined, fd);
+}
+
+// ---- pixel canvas ----
+const cv = $('cv'), ctx = cv.getContext('2d');
+let cvErase = false, painting = false;
+function cvClear(){ ctx.fillStyle = '#000'; ctx.fillRect(0, 0, 64, 64); }
+cvClear();
+function paint(e) {
+  const r = cv.getBoundingClientRect();
+  const x = Math.floor((e.clientX - r.left) / r.width * 64);
+  const y = Math.floor((e.clientY - r.top) / r.height * 64);
+  if (x < 0 || y < 0 || x > 63 || y > 63) return;
+  ctx.fillStyle = cvErase ? '#000' : $('cvColor').value;
+  ctx.fillRect(x, y, 1, 1);
+}
+cv.addEventListener('pointerdown', e => { painting = true; cv.setPointerCapture(e.pointerId); paint(e); });
+cv.addEventListener('pointermove', e => painting && paint(e));
+cv.addEventListener('pointerup', () => painting = false);
+
+function pushCanvas() {
+  const d = ctx.getImageData(0, 0, 64, 64).data, px = [];
+  for (let i = 0; i < d.length; i += 4) px.push([d[i], d[i+1], d[i+2]]);
+  note('pushing canvas…');
+  api('/canvas', { pixels: px });
+}
+
+// ---- populate enums ----
+(async () => {
+  const e = await (await fetch('/enums')).json();
+  const fill = (sel, obj, pretty) => {
+    for (const [name, val] of Object.entries(obj)) sel.add(new Option(pretty ? name.replace(/_/g,' ').toLowerCase() : name, typeof val === 'number' ? val : name));
+  };
+  fill($('txtMode'), e.text_modes, true); $('txtMode').value = e.text_modes.MARQUEE;
+  for (const name of Object.keys(e.text_color_modes)) $('txtColorMode').add(new Option(name.replace(/_/g,' ').toLowerCase(), name));
+  $('txtColorMode').value = 'RGB';
+  fill($('clockStyle'), e.clock_styles); $('clockStyle').value = e.clock_styles.Color;
+  fill($('fxStyle'), e.effect_styles, true);
+  refreshStatus();
+  setInterval(refreshStatus, 10000);
+})();
+</script>
+</body>
+</html>

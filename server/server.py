@@ -1,0 +1,435 @@
+"""Local HTTP API for iDotMatrix BLE pixel displays (64x64 by default).
+
+Wraps markusressel/idotmatrix-api-client behind FastAPI so anything on your
+machine (curl, scripts, Shortcuts, Home Assistant, …) can drive the panel
+without the iDotMatrix iOS app.
+
+Run:  ./run.sh   (then open http://127.0.0.1:8588/ for the control panel)
+
+Env:
+  IDM_SIZE     16 | 32 | 64          (default 64)
+  IDM_ADDRESS  BLE address/UUID      (default: last connected, else discovery)
+  IDM_PORT     HTTP port             (default 8588, used by run.sh)
+"""
+
+import asyncio
+import logging
+import os
+import tempfile
+from pathlib import Path
+from typing import List, Optional, Tuple, Union
+
+from fastapi import Body, FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+
+from idotmatrix.client import IDotMatrixClient
+from idotmatrix.connection_manager import ConnectionManager
+from idotmatrix.modules.clock import ClockStyle
+from idotmatrix.modules.effect import EffectStyle
+from idotmatrix.modules.text import TextColorMode, TextMode
+from idotmatrix.screensize import ScreenSize
+from idotmatrix.util.image_utils import ResizeMode
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+log = logging.getLogger("idotmatrix-local")
+
+BASE_DIR = Path(__file__).resolve().parent
+ADDRESS_FILE = BASE_DIR / ".device_address"
+
+_SIZES = {16: ScreenSize.SIZE_16x16, 32: ScreenSize.SIZE_32x32, 64: ScreenSize.SIZE_64x64}
+SIZE = int(os.environ.get("IDM_SIZE", "64"))
+if SIZE not in _SIZES:
+    raise SystemExit(f"IDM_SIZE must be one of {sorted(_SIZES)}, got {SIZE}")
+
+
+def _saved_address() -> Optional[str]:
+    addr = os.environ.get("IDM_ADDRESS")
+    if addr:
+        return addr
+    if ADDRESS_FILE.exists():
+        return ADDRESS_FILE.read_text().strip() or None
+    return None
+
+
+client = IDotMatrixClient(screen_size=_SIZES[SIZE], mac_address=_saved_address())
+client.set_auto_reconnect(True)
+
+# BLE is a single serial channel — serialize every device operation.
+device_lock = asyncio.Lock()
+
+app = FastAPI(title="iDotMatrix Local API", version="1.0")
+
+Color = Union[str, Tuple[int, int, int], List[int]]
+
+
+def parse_color(value: Color) -> Tuple[int, int, int]:
+    """Accept '#rrggbb', 'rrggbb', 'r,g,b' or [r,g,b]."""
+    if isinstance(value, (tuple, list)):
+        if len(value) != 3:
+            raise HTTPException(422, f"color needs 3 components, got {value!r}")
+        return tuple(int(c) for c in value)
+    s = value.strip().lstrip("#")
+    if "," in s:
+        parts = [p.strip() for p in s.split(",")]
+        if len(parts) != 3:
+            raise HTTPException(422, f"color needs 3 components, got {value!r}")
+        return tuple(int(p) for p in parts)
+    if len(s) != 6:
+        raise HTTPException(422, f"bad hex color {value!r}")
+    return tuple(int(s[i : i + 2], 16) for i in (0, 2, 4))
+
+
+async def run_on_device(coro_factory, *, timeout: float = 90.0):
+    """Connect if needed and run one device operation under the lock."""
+    async with device_lock:
+        try:
+            await asyncio.wait_for(client.connect(), timeout=30)
+            return await asyncio.wait_for(coro_factory(), timeout=timeout)
+        except asyncio.TimeoutError:
+            raise HTTPException(504, "device operation timed out")
+        except HTTPException:
+            raise
+        except Exception as exc:  # bleak errors vary by backend
+            log.exception("device operation failed")
+            raise HTTPException(502, f"{type(exc).__name__}: {exc}")
+
+
+# ---------------------------------------------------------------- meta
+
+@app.get("/health")
+async def health():
+    return {"ok": True, "size": SIZE}
+
+
+@app.get("/status")
+async def status():
+    return {
+        "connected": client._connection_manager.is_connected(),
+        "address": client.mac_address,
+        "size": SIZE,
+    }
+
+
+@app.get("/enums")
+async def enums():
+    return {
+        "text_modes": {m.name: m.value for m in TextMode},
+        "text_color_modes": {m.name: m.value for m in TextColorMode},
+        "clock_styles": {m.name: m.value for m in ClockStyle},
+        "effect_styles": {m.name: m.value for m in EffectStyle},
+        "resize_modes": [m.value for m in ResizeMode],
+    }
+
+
+@app.post("/scan")
+async def scan():
+    async with device_lock:
+        try:
+            devices = await asyncio.wait_for(ConnectionManager.discover_devices(), timeout=30)
+        except Exception as exc:
+            raise HTTPException(502, f"scan failed: {type(exc).__name__}: {exc}")
+    return {"devices": devices}
+
+
+class ConnectBody(BaseModel):
+    address: Optional[str] = None
+
+
+@app.post("/connect")
+async def connect(body: ConnectBody = Body(default=ConnectBody())):
+    if body.address:
+        client.mac_address = body.address
+        client._connection_manager.set_address(body.address)
+    await run_on_device(lambda: asyncio.sleep(0))  # connect happens inside
+    if client.mac_address:
+        ADDRESS_FILE.write_text(client.mac_address)
+    return await status()
+
+
+@app.post("/disconnect")
+async def disconnect():
+    async with device_lock:
+        await client.disconnect()
+    return {"connected": False}
+
+
+# ---------------------------------------------------------------- basics
+
+class BrightnessBody(BaseModel):
+    percent: int
+
+
+@app.post("/brightness")
+async def brightness(body: BrightnessBody):
+    if not 5 <= body.percent <= 100:
+        raise HTTPException(422, "percent must be 5-100")
+    await run_on_device(lambda: client.set_brightness(body.percent))
+    return {"brightness": body.percent}
+
+
+class ScreenBody(BaseModel):
+    on: bool
+
+
+@app.post("/screen")
+async def screen(body: ScreenBody):
+    await run_on_device(lambda: client.common.set_screen_state(body.on))
+    return {"on": body.on}
+
+
+@app.post("/screen/flip")
+async def screen_flip(flip: bool = Body(True, embed=True)):
+    await run_on_device(lambda: client.common.set_screen_flipped(flip))
+    return {"flipped": flip}
+
+
+@app.post("/freeze")
+async def freeze():
+    await run_on_device(lambda: client.common.freeze_screen())
+    return {"frozen": True}
+
+
+@app.post("/time/sync")
+async def time_sync():
+    from datetime import datetime
+
+    now = datetime.now()
+    await run_on_device(lambda: client.common.set_time(now))
+    return {"time": now.isoformat()}
+
+
+@app.post("/reset")
+async def reset():
+    await run_on_device(lambda: client.reset())
+    return {"reset": True}
+
+
+# ---------------------------------------------------------------- content
+
+class ColorBody(BaseModel):
+    color: Color
+
+
+@app.post("/color")
+async def fullscreen_color(body: ColorBody):
+    rgb = parse_color(body.color)
+    await run_on_device(lambda: client.color.show_color(rgb))
+    return {"color": rgb}
+
+
+class TextBody(BaseModel):
+    text: str
+    font_size: int = 16
+    mode: Union[str, int] = "MARQUEE"
+    speed: int = 95
+    color: Optional[Color] = None          # sets RGB mode when given
+    color_mode: Optional[Union[str, int]] = None  # overrides (e.g. RAINBOW_1)
+    bg_color: Optional[Color] = None
+    font_path: Optional[str] = None
+
+
+def _enum_lookup(enum_cls, value, what):
+    if isinstance(value, int):
+        return enum_cls(value)
+    try:
+        return enum_cls[str(value).upper()]
+    except KeyError:
+        raise HTTPException(422, f"unknown {what} {value!r}; one of {[m.name for m in enum_cls]}")
+
+
+@app.post("/text")
+async def text(body: TextBody):
+    mode = _enum_lookup(TextMode, body.mode, "text mode")
+    rgb = parse_color(body.color) if body.color is not None else None
+    if body.color_mode is not None:
+        color_mode = _enum_lookup(TextColorMode, body.color_mode, "text color mode")
+    else:
+        color_mode = TextColorMode.RGB if rgb else TextColorMode.WHITE
+    bg = parse_color(body.bg_color) if body.bg_color is not None else None
+    await run_on_device(
+        lambda: client.text.show_text(
+            body.text,
+            font_size=body.font_size,
+            font_path=body.font_path,
+            text_mode=mode,
+            speed=body.speed,
+            text_color_mode=color_mode,
+            text_color=rgb,
+            text_bg_color=bg,
+        ),
+        timeout=120,
+    )
+    return {"text": body.text, "mode": mode.name, "color_mode": color_mode.name}
+
+
+class ClockBody(BaseModel):
+    style: Union[str, int] = "Color"
+    show_date: bool = True
+    hour24: bool = True
+    color: Optional[Color] = None
+
+
+@app.post("/clock")
+async def clock(body: ClockBody):
+    style = body.style
+    if isinstance(style, str):
+        match = [m for m in ClockStyle if m.name.lower() == style.lower()]
+        if not match:
+            raise HTTPException(422, f"unknown clock style {style!r}; one of {[m.name for m in ClockStyle]}")
+        style = match[0]
+    else:
+        style = ClockStyle(style)
+    rgb = parse_color(body.color) if body.color is not None else None
+    await run_on_device(lambda: client.clock.show(style=style, show_date=body.show_date, hour24=body.hour24, color=rgb))
+    return {"clock": style.name}
+
+
+class EffectBody(BaseModel):
+    style: Union[str, int]
+    colors: List[Color] = []
+
+
+@app.post("/effect")
+async def effect(body: EffectBody):
+    style = _enum_lookup(EffectStyle, body.style, "effect style")
+    colors = [parse_color(c) for c in body.colors] or [(255, 0, 0), (0, 255, 0), (0, 0, 255)]
+    await run_on_device(lambda: client.effect.show(style, colors))
+    return {"effect": style.name, "colors": colors}
+
+
+class PixelsBody(BaseModel):
+    color: Color
+    pixels: List[Tuple[int, int]]
+
+
+@app.post("/pixels")
+async def pixels(body: PixelsBody):
+    rgb = parse_color(body.color)
+    for x, y in body.pixels:
+        if not (0 <= x < SIZE and 0 <= y < SIZE):
+            raise HTTPException(422, f"pixel ({x},{y}) outside {SIZE}x{SIZE}")
+    await run_on_device(lambda: client.graffiti.set_pixels(rgb, [tuple(p) for p in body.pixels]))
+    return {"color": rgb, "count": len(body.pixels)}
+
+
+class CanvasBody(BaseModel):
+    # Flat row-major list of SIZE*SIZE colors ('#rrggbb' or [r,g,b]).
+    pixels: List[Color]
+
+
+@app.post("/canvas")
+async def canvas(body: CanvasBody):
+    if len(body.pixels) != SIZE * SIZE:
+        raise HTTPException(422, f"need exactly {SIZE * SIZE} pixels, got {len(body.pixels)}")
+    data = [parse_color(c) for c in body.pixels]
+    await run_on_device(lambda: client.image.upload_image_pixeldata(data), timeout=120)
+    return {"uploaded": len(data)}
+
+
+class ScoreboardBody(BaseModel):
+    home: int
+    away: int
+
+
+@app.post("/scoreboard")
+async def scoreboard(body: ScoreboardBody):
+    await run_on_device(lambda: client.scoreboard.show(body.home, body.away))
+    return {"home": body.home, "away": body.away}
+
+
+class CountdownBody(BaseModel):
+    minutes: int
+    seconds: int = 0
+
+
+@app.post("/countdown/start")
+async def countdown_start(body: CountdownBody):
+    await run_on_device(lambda: client.countdown.start(body.minutes, body.seconds))
+    return {"countdown": f"{body.minutes}:{body.seconds:02d}"}
+
+
+@app.post("/countdown/stop")
+async def countdown_stop():
+    await run_on_device(lambda: client.countdown.stop())
+    return {"countdown": "stopped"}
+
+
+# ---------------------------------------------------------------- files
+
+def _resize_mode(value: str) -> ResizeMode:
+    try:
+        return ResizeMode(value)
+    except ValueError:
+        raise HTTPException(422, f"resize must be one of {[m.value for m in ResizeMode]}")
+
+
+async def _save_upload(file: UploadFile, suffix: str) -> Path:
+    data = await file.read()
+    if not data:
+        raise HTTPException(422, "empty upload")
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix, dir=tempfile.gettempdir())
+    tmp.write(data)
+    tmp.close()
+    return Path(tmp.name)
+
+
+@app.post("/image")
+async def image(
+    file: Optional[UploadFile] = File(None),
+    path: Optional[str] = None,
+    resize: str = "fit",
+    palletize: bool = False,
+):
+    resize_mode = _resize_mode(resize)
+    if file is not None:
+        src = await _save_upload(file, Path(file.filename or "img.png").suffix or ".png")
+    elif path:
+        src = Path(path).expanduser()
+        if not src.exists():
+            raise HTTPException(404, f"no such file: {src}")
+    else:
+        raise HTTPException(422, "provide a multipart 'file' or a 'path' query param")
+    try:
+        await run_on_device(
+            lambda: client.image.upload_image_file(src, resize_mode=resize_mode, palletize=palletize),
+            timeout=180,
+        )
+    finally:
+        if file is not None:
+            src.unlink(missing_ok=True)
+    return {"image": file.filename if file else str(src), "resize": resize}
+
+
+@app.post("/gif")
+async def gif(
+    file: Optional[UploadFile] = File(None),
+    path: Optional[str] = None,
+    resize: str = "fit",
+    frame_ms: Optional[int] = None,
+):
+    resize_mode = _resize_mode(resize)
+    if file is not None:
+        src = await _save_upload(file, ".gif")
+    elif path:
+        src = Path(path).expanduser()
+        if not src.exists():
+            raise HTTPException(404, f"no such file: {src}")
+    else:
+        raise HTTPException(422, "provide a multipart 'file' or a 'path' query param")
+    try:
+        await run_on_device(
+            lambda: client.gif.upload_gif_file(src, resize_mode=resize_mode, duration_per_frame_in_ms=frame_ms),
+            timeout=300,
+        )
+    finally:
+        if file is not None:
+            src.unlink(missing_ok=True)
+    return {"gif": file.filename if file else str(src), "resize": resize}
+
+
+# ---------------------------------------------------------------- UI
+
+@app.get("/")
+async def index():
+    return FileResponse(BASE_DIR / "static" / "index.html")
