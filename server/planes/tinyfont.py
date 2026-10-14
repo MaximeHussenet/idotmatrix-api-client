@@ -47,15 +47,19 @@ FONT = {
     "?": ("110", "001", "010", "000", "010"),
     "/": ("001", "001", "010", "100", "100"),
     ":": ("000", "010", "000", "010", "000"),
+    "(": ("010", "100", "100", "100", "010"),
+    ")": ("010", "001", "001", "001", "010"),
     " ": ("000", "000", "000", "000", "000"),
 }
 
 
-def draw_text(img: Image.Image, x: int, y: int, text: str, color) -> None:
+def draw_text(img: Image.Image, x: int, y: int, text: str, color, tall: bool = False) -> None:
+    """Render text; tall=True duplicates the middle glyph row (3x6 instead of 3x5)."""
     w, h = img.size
     for ch in text.upper():
         glyph = FONT.get(ch, FONT["?"])
-        for gy, row in enumerate(glyph):
+        rows = glyph[:3] + (glyph[2],) + glyph[3:] if tall else glyph
+        for gy, row in enumerate(rows):
             for gx, bit in enumerate(row):
                 if bit == "1" and 0 <= x + gx < w and 0 <= y + gy < h:
                     img.putpixel((x + gx, y + gy), color)
