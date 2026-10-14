@@ -22,7 +22,6 @@ class TestTextModule(TestBase):
             text_color_mode=TextColorMode.WHITE,
             text_color=(255, 0, 0),
             text_bg_color=(0, 20, 0),
-            font_path="../fonts/Rain-DRM3.otf",
         )
 
         # THEN

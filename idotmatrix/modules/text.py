@@ -1,6 +1,7 @@
 import logging
 import zlib
 from enum import Enum
+from pathlib import Path
 from typing import Tuple, Optional
 
 from PIL import Image, ImageDraw, ImageFont
@@ -180,7 +181,8 @@ class TextModule(IDotMatrixModule):
         """Converts text to bitmap images suitable for iDotMatrix devices."""
         if not font_path:
             # using open source font from https://www.fontspace.com/rain-font-f22577
-            font_path = "./fonts/Rain-DRM3.otf"
+            # bundled as package data so the default works regardless of cwd
+            font_path = str(Path(__file__).resolve().parent.parent / "fonts" / "Rain-DRM3.otf")
         font = ImageFont.truetype(font_path, font_size)
         byte_stream = bytearray()
         for char in text:

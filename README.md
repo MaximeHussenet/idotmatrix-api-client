@@ -15,6 +15,11 @@
 > In addition to that, the support for returning the raw bytearray data for specific commands **has been dropped**
 > to simplify maintenance and usability of the library.
 
+> [!TIP]
+> **This fork ([MaximeHussenet/idotmatrix-api-client](https://github.com/MaximeHussenet/idotmatrix-api-client))**
+> adds a local HTTP API + web control panel on top of the library — see [`server/README.md`](server/README.md).
+> It also bundles the default text font as package data so `show_text()` works regardless of the working directory.
+
 <br/>
 <p align="center">
   <a href="https://github.com/derkamarkusressel/python3-idotmatrix-library">
