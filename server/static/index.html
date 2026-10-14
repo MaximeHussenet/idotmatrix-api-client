@@ -37,6 +37,7 @@
     <h2>Mode <span id="modeTag" style="color:var(--accent);text-transform:none;letter-spacing:0">—</span></h2>
     <div class="row">
       <button data-mode="bart" onclick="api('/bart/start', {interval_s:+$('bartInt').value}).then(bartRefresh)">🚇 BART map</button>
+      <button data-mode="planes" onclick="planesStart()">✈️ Planes</button>
       <button data-mode="clock" onclick="api('/clock', {style:+$('clockStyle').value, color:$('clockColor').value})">🕐 Clock</button>
       <button data-mode="effect" onclick="api('/effect', {style:+$('fxStyle').value})">✨ Effect</button>
       <button data-mode="text" onclick="sendText()">📝 Text</button>
@@ -143,6 +144,28 @@
       <img id="bartPreview" width="192" height="192" style="image-rendering:pixelated;border-radius:6px;border:1px solid #2c3540" alt="">
     </div>
     <div class="row"><label>Base map + BART lines, one dot per live train (line colors), refreshed every minute from BART GTFS-Realtime.</label></div>
+  </div>
+
+  <div class="card">
+    <h2>✈️ Planes overhead</h2>
+    <div class="row">
+      <button class="primary" onclick="planesStart()">Start</button>
+      <button onclick="api('/planes/stop').then(planesRefresh)">Stop</button>
+      <span id="planesStatus" style="color:var(--muted);font-size:12px">—</span>
+    </div>
+    <div class="row">
+      <label>Lat</label><input type="number" id="plLat" step="0.0001" style="width:92px">
+      <label>Lon</label><input type="number" id="plLon" step="0.0001" style="width:92px">
+      <label>Radius</label><input type="number" id="plRad" min="1" max="250" style="width:56px"> nm
+    </div>
+    <div class="row">
+      <label>Refresh</label><input type="number" id="plInt" min="10" max="3600" style="width:56px"> s
+      <label>Rotate</label><input type="number" id="plRot" min="3" max="3600" style="width:56px"> s
+    </div>
+    <div class="row">
+      <img id="planesPreview" width="192" height="192" style="image-rendering:pixelated;border-radius:6px;border:1px solid #2c3540" alt="">
+    </div>
+    <div class="row"><label>Callsign, route, type, altitude, speed + radar of nearby aircraft (adsb.lol + adsbdb). Cycles through planes when several are overhead.</label></div>
   </div>
 
   <div class="card" style="grid-column:1/-1">
@@ -265,6 +288,33 @@ async function bartRefresh() {
 }
 bartRefresh();
 setInterval(bartRefresh, 15000);
+
+// ---- planes mode ----
+function planesStart() {
+  api('/planes/start', {
+    lat: +$('plLat').value, lon: +$('plLon').value, radius_nm: +$('plRad').value,
+    interval_s: +$('plInt').value, rotate_s: +$('plRot').value,
+  }).then(planesRefresh);
+}
+let planesCfgLoaded = false;
+async function planesRefresh() {
+  try {
+    const s = await (await fetch('/planes/status')).json();
+    if (!planesCfgLoaded) {
+      planesCfgLoaded = true;
+      $('plLat').value = s.config.lat; $('plLon').value = s.config.lon;
+      $('plRad').value = s.config.radius_nm; $('plInt').value = s.config.interval_s;
+      $('plRot').value = s.config.rotate_s;
+    }
+    const when = s.last_update ? new Date(s.last_update * 1000).toLocaleTimeString() : 'never';
+    $('planesStatus').textContent =
+      (s.running ? `running · ${s.planes ?? '?'} planes · ${s.featured || 'no traffic'} · ${when}` : 'stopped') +
+      (s.last_error ? ` · ⚠ ${s.last_error}` : '');
+    if (s.running && s.last_update) $('planesPreview').src = '/planes/frame.png?t=' + Date.now();
+  } catch {}
+}
+planesRefresh();
+setInterval(planesRefresh, 8000);
 
 // ---- populate enums ----
 (async () => {

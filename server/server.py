@@ -18,6 +18,7 @@ import io
 import logging
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
@@ -69,12 +70,14 @@ display = {"mode": None, "detail": None}
 
 
 def claim_display(mode: Optional[str], detail: Optional[str] = None) -> None:
-    if mode != "bart":
-        task = _bart["task"]
+    for name, state in (("bart", _bart), ("planes", _planes)):
+        if name == mode:
+            continue
+        task = state["task"]
         if task is not None and not task.done():
             task.cancel()
-            _bart["task"] = None
-            log.info("bart loop stopped: display claimed by %s", mode)
+            state["task"] = None
+            log.info("%s loop stopped: display claimed by %s", name, mode)
     display["mode"] = mode
     display["detail"] = detail
 
@@ -576,6 +579,142 @@ async def bart_frame_png():
     big.save(buf, format="PNG")
     return Response(buf.getvalue(), media_type="image/png",
                     headers={"Cache-Control": "no-store"})
+
+
+# ---------------------------------------------------------------- planes mode
+
+_planes = {"mode": None, "task": None, "interval": 30, "rotate": 8}
+PLANES_CONFIG_FILE = BASE_DIR / ".planes_config"
+
+
+def _planes_defaults() -> dict:
+    cfg = {
+        "lat": float(os.environ.get("IDM_LAT", "37.7749")),
+        "lon": float(os.environ.get("IDM_LON", "-122.4194")),
+        "radius_nm": 12.0,
+        "interval_s": 30,
+        "rotate_s": 8,
+    }
+    if PLANES_CONFIG_FILE.exists():
+        try:
+            import json
+
+            cfg.update(json.loads(PLANES_CONFIG_FILE.read_text()))
+        except Exception:
+            log.warning("ignoring unreadable %s", PLANES_CONFIG_FILE)
+    return cfg
+
+
+class PlanesStartBody(BaseModel):
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    radius_nm: Optional[float] = None
+    interval_s: Optional[int] = None   # data refresh
+    rotate_s: Optional[int] = None     # featured-plane rotation / push cadence
+
+
+async def _planes_loop():
+    mode = _planes["mode"]
+    last_fetch = 0.0
+    featured = -1
+    idle = False  # "NO TRAFFIC" already on the panel
+    while True:
+        try:
+            if time.time() - last_fetch >= _planes["interval"]:
+                await mode.refresh()
+                last_fetch = time.time()
+            if mode.planes:
+                featured += 1
+                idle = False
+                frame = mode.render(featured)
+                await _push_pil_image(frame, timeout=120)
+                log.info("planes frame pushed: %s (%d overhead)", mode.last_shown, len(mode.planes))
+            elif not idle:
+                await _push_pil_image(mode.render(0), timeout=120)
+                idle = True
+                log.info("planes frame pushed: no traffic")
+            else:
+                mode.render(0)  # keep the preview fresh
+            delay = _planes["rotate"]
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            mode.last_error = f"{type(exc).__name__}: {exc}"
+            log.warning("planes loop iteration failed: %s", mode.last_error)
+            delay = max(15, _planes["interval"])
+        await asyncio.sleep(delay)
+
+
+@app.post("/planes/start")
+async def planes_start(body: PlanesStartBody = Body(default=PlanesStartBody())):
+    from planes import PlanesOverhead
+
+    cfg = _planes_defaults()
+    for key in cfg:
+        value = getattr(body, key)
+        if value is not None:
+            cfg[key] = value
+    if not 1 <= cfg["radius_nm"] <= 250:
+        raise HTTPException(422, "radius_nm must be 1-250")
+    if not 10 <= cfg["interval_s"] <= 3600 or not 3 <= cfg["rotate_s"] <= 3600:
+        raise HTTPException(422, "interval_s must be 10-3600, rotate_s 3-3600")
+
+    import json
+
+    PLANES_CONFIG_FILE.write_text(json.dumps(cfg))
+    task = _planes["task"]
+    if task is not None and not task.done():
+        task.cancel()
+    _planes["mode"] = PlanesOverhead(cfg["lat"], cfg["lon"], cfg["radius_nm"])
+    _planes["interval"] = cfg["interval_s"]
+    _planes["rotate"] = cfg["rotate_s"]
+    claim_display("planes", f"r{cfg['radius_nm']:.0f}nm every {cfg['rotate_s']}s")
+    _planes["task"] = asyncio.create_task(_planes_loop())
+    return await planes_status()
+
+
+@app.post("/planes/stop")
+async def planes_stop():
+    task = _planes["task"]
+    if task is not None and not task.done():
+        task.cancel()
+    _planes["task"] = None
+    if display["mode"] == "planes":
+        display["mode"] = display["detail"] = None
+    return {"running": False}
+
+
+@app.get("/planes/status")
+async def planes_status():
+    mode = _planes["mode"]
+    running = _planes["task"] is not None and not _planes["task"].done()
+    return {
+        "running": running,
+        "config": _planes_defaults(),
+        "planes": len(mode.planes) if mode else None,
+        "featured": mode.last_shown if mode else None,
+        "last_update": mode.last_update if mode else None,
+        "last_error": mode.last_error if mode else None,
+    }
+
+
+@app.get("/planes/frame.png")
+async def planes_frame_png():
+    mode = _planes["mode"]
+    if mode is None or mode.last_frame is None:
+        raise HTTPException(404, "planes mode has not rendered yet")
+    big = mode.last_frame.resize((SIZE * 6, SIZE * 6), resample=Image.NEAREST)
+    buf = io.BytesIO()
+    big.save(buf, format="PNG")
+    return Response(buf.getvalue(), media_type="image/png",
+                    headers={"Cache-Control": "no-store"})
+
+
+@app.on_event("startup")
+async def _planes_autostart():
+    if os.environ.get("IDM_PLANES_AUTOSTART") == "1":
+        log.info("IDM_PLANES_AUTOSTART=1 — starting planes overhead")
+        await planes_start(PlanesStartBody())
 
 
 # ---------------------------------------------------------------- UI
