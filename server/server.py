@@ -62,6 +62,22 @@ client.set_auto_reconnect(True)
 # BLE is a single serial channel — serialize every device operation.
 device_lock = asyncio.Lock()
 
+# Server-side view of what the panel is showing (the panel can't be queried).
+# "bart" is the only continuous mode: claiming the display for anything else
+# stops its loop, otherwise the next refresh would overwrite the new content.
+display = {"mode": None, "detail": None}
+
+
+def claim_display(mode: Optional[str], detail: Optional[str] = None) -> None:
+    if mode != "bart":
+        task = _bart["task"]
+        if task is not None and not task.done():
+            task.cancel()
+            _bart["task"] = None
+            log.info("bart loop stopped: display claimed by %s", mode)
+    display["mode"] = mode
+    display["detail"] = detail
+
 app = FastAPI(title="iDotMatrix Local API", version="1.0")
 
 Color = Union[str, Tuple[int, int, int], List[int]]
@@ -112,6 +128,8 @@ async def status():
         "connected": client._connection_manager.is_connected(),
         "address": client.mac_address,
         "size": SIZE,
+        "mode": display["mode"],
+        "mode_detail": display["detail"],
     }
 
 
@@ -205,6 +223,7 @@ async def time_sync():
 
 @app.post("/reset")
 async def reset():
+    claim_display(None)
     await run_on_device(lambda: client.reset())
     return {"reset": True}
 
@@ -218,6 +237,7 @@ class ColorBody(BaseModel):
 @app.post("/color")
 async def fullscreen_color(body: ColorBody):
     rgb = parse_color(body.color)
+    claim_display("color", "#%02x%02x%02x" % rgb)
     await run_on_device(lambda: client.color.show_color(rgb))
     return {"color": rgb}
 
@@ -251,6 +271,7 @@ async def text(body: TextBody):
     else:
         color_mode = TextColorMode.RGB if rgb else TextColorMode.WHITE
     bg = parse_color(body.bg_color) if body.bg_color is not None else None
+    claim_display("text", body.text[:32])
     await run_on_device(
         lambda: client.text.show_text(
             body.text,
@@ -285,6 +306,7 @@ async def clock(body: ClockBody):
     else:
         style = ClockStyle(style)
     rgb = parse_color(body.color) if body.color is not None else None
+    claim_display("clock", style.name)
     await run_on_device(lambda: client.clock.show(style=style, show_date=body.show_date, hour24=body.hour24, color=rgb))
     return {"clock": style.name}
 
@@ -298,6 +320,7 @@ class EffectBody(BaseModel):
 async def effect(body: EffectBody):
     style = _enum_lookup(EffectStyle, body.style, "effect style")
     colors = [parse_color(c) for c in body.colors] or [(255, 0, 0), (0, 255, 0), (0, 0, 255)]
+    claim_display("effect", style.name)
     await run_on_device(lambda: client.effect.show(style, colors))
     return {"effect": style.name, "colors": colors}
 
@@ -313,6 +336,7 @@ async def pixels(body: PixelsBody):
     for x, y in body.pixels:
         if not (0 <= x < SIZE and 0 <= y < SIZE):
             raise HTTPException(422, f"pixel ({x},{y}) outside {SIZE}x{SIZE}")
+    claim_display("pixels", f"{len(body.pixels)} px")
     await run_on_device(lambda: client.graffiti.set_pixels(rgb, [tuple(p) for p in body.pixels]))
     return {"color": rgb, "count": len(body.pixels)}
 
@@ -344,6 +368,7 @@ async def canvas(body: CanvasBody):
     data = [parse_color(c) for c in body.pixels]
     img = Image.new("RGB", (SIZE, SIZE))
     img.putdata(data)
+    claim_display("canvas")
     await _push_pil_image(img)
     return {"uploaded": len(data)}
 
@@ -355,6 +380,7 @@ class ScoreboardBody(BaseModel):
 
 @app.post("/scoreboard")
 async def scoreboard(body: ScoreboardBody):
+    claim_display("scoreboard", f"{body.home}:{body.away}")
     await run_on_device(lambda: client.scoreboard.show(body.home, body.away))
     return {"home": body.home, "away": body.away}
 
@@ -366,6 +392,7 @@ class CountdownBody(BaseModel):
 
 @app.post("/countdown/start")
 async def countdown_start(body: CountdownBody):
+    claim_display("countdown", f"{body.minutes}:{body.seconds:02d}")
     await run_on_device(lambda: client.countdown.start(body.minutes, body.seconds))
     return {"countdown": f"{body.minutes}:{body.seconds:02d}"}
 
@@ -411,6 +438,7 @@ async def image(
             raise HTTPException(404, f"no such file: {src}")
     else:
         raise HTTPException(422, "provide a multipart 'file' or a 'path' query param")
+    claim_display("image", file.filename if file else src.name)
     try:
         from PIL import ImageOps
         from idotmatrix.util import image_utils
@@ -447,6 +475,7 @@ async def gif(
             raise HTTPException(404, f"no such file: {src}")
     else:
         raise HTTPException(422, "provide a multipart 'file' or a 'path' query param")
+    claim_display("gif", file.filename if file else src.name)
     try:
         await run_on_device(
             lambda: client.gif.upload_gif_file(src, resize_mode=resize_mode, duration_per_frame_in_ms=frame_ms),
@@ -506,6 +535,7 @@ async def bart_start(body: BartStartBody = Body(default=BartStartBody())):
         raise HTTPException(422, "interval_s must be 15-3600")
     await _get_bart_mode()
     _bart["interval"] = body.interval_s
+    claim_display("bart", f"every {body.interval_s}s")
     if _bart["task"] is None or _bart["task"].done():
         _bart["task"] = asyncio.create_task(_bart_loop())
     return await bart_status()
@@ -517,6 +547,8 @@ async def bart_stop():
     if task is not None and not task.done():
         task.cancel()
     _bart["task"] = None
+    if display["mode"] == "bart":
+        display["mode"] = display["detail"] = None
     return {"running": False}
 
 

@@ -15,6 +15,7 @@
   button { background:#2a3340; color:var(--fg); border:0; border-radius:7px; padding:8px 12px; cursor:pointer; font-size:13px; }
   button:hover { background:#344050; }
   button.primary { background:var(--accent); color:#06121f; font-weight:600; }
+  button.active { outline:2px solid var(--accent); background:#1d3350; }
   input[type=text], input[type=number], select { background:#10151a; color:var(--fg); border:1px solid #2c3540; border-radius:7px; padding:7px 9px; font-size:13px; }
   input[type=color] { width:42px; height:34px; border:0; background:none; padding:0; cursor:pointer; }
   input[type=range] { width:100%; }
@@ -31,6 +32,22 @@
 <body>
 <h1>⚡ iDotMatrix Local <span id="sizeTag" style="color:var(--muted);font-weight:400"></span></h1>
 <div class="grid">
+
+  <div class="card" style="grid-column:1/-1">
+    <h2>Mode <span id="modeTag" style="color:var(--accent);text-transform:none;letter-spacing:0">—</span></h2>
+    <div class="row">
+      <button data-mode="bart" onclick="api('/bart/start', {interval_s:+$('bartInt').value}).then(bartRefresh)">🚇 BART map</button>
+      <button data-mode="clock" onclick="api('/clock', {style:+$('clockStyle').value, color:$('clockColor').value})">🕐 Clock</button>
+      <button data-mode="effect" onclick="api('/effect', {style:+$('fxStyle').value})">✨ Effect</button>
+      <button data-mode="text" onclick="sendText()">📝 Text</button>
+      <button data-mode="color" onclick="api('/color', {color:$('fsColor').value})">🎨 Color</button>
+      <button data-mode="canvas" onclick="pushCanvas()">🖌 Canvas</button>
+      <span class="grow"></span>
+      <button onclick="api('/screen', {on:true})">💡 On</button>
+      <button onclick="api('/screen', {on:false})">⬛ Off</button>
+    </div>
+    <div class="row"><label>One-click mode switch — each button uses the options set in its card below. Switching away from BART stops its refresh loop.</label></div>
+  </div>
 
   <div class="card">
     <h2><span id="connDot" class="dot"></span>Connection</h2>
@@ -116,8 +133,10 @@
   <div class="card">
     <h2>🚇 BART live map</h2>
     <div class="row">
-      <button class="primary" onclick="api('/bart/start').then(bartRefresh)">Start</button>
+      <button class="primary" onclick="api('/bart/start', {interval_s:+$('bartInt').value}).then(bartRefresh)">Start</button>
       <button onclick="api('/bart/stop').then(bartRefresh)">Stop</button>
+      <label>every</label>
+      <input type="number" id="bartInt" value="60" min="15" max="3600" style="width:64px"> s
       <span id="bartStatus" style="color:var(--muted);font-size:12px">—</span>
     </div>
     <div class="row">
@@ -173,6 +192,9 @@ async function refreshStatus() {
     const s = await (await fetch('/status')).json();
     $('connDot').className = 'dot' + (s.connected ? ' on' : '');
     $('sizeTag').textContent = `${s.size}×${s.size}` + (s.address ? ` · ${s.address.slice(0,13)}…` : '');
+    $('modeTag').textContent = s.mode ? s.mode + (s.mode_detail ? ` · ${s.mode_detail}` : '') : '—';
+    for (const b of document.querySelectorAll('button[data-mode]'))
+      b.classList.toggle('active', b.dataset.mode === s.mode);
   } catch {}
 }
 
