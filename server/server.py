@@ -359,7 +359,16 @@ async def _push_pil_image(img: Image.Image, timeout: float = 180) -> None:
         img.convert("RGB").save(f, format="GIF")
         path = f.name
     try:
-        await run_on_device(lambda: client.gif.upload_gif_file(path, palletize=True), timeout=timeout)
+        try:
+            await run_on_device(lambda: client.gif.upload_gif_file(path, palletize=True), timeout=timeout)
+        except HTTPException as exc:
+            # The panel's weak BLE link occasionally drops mid-upload. One
+            # quick retry repaints the frame instead of leaving it broken
+            # until the next loop iteration.
+            if exc.status_code != 502:
+                raise
+            await asyncio.sleep(3)
+            await run_on_device(lambda: client.gif.upload_gif_file(path, palletize=True), timeout=timeout)
     finally:
         os.unlink(path)
 
@@ -641,7 +650,7 @@ async def _planes_loop():
         except Exception as exc:
             mode.last_error = f"{type(exc).__name__}: {exc}"
             log.warning("planes loop iteration failed: %s", mode.last_error)
-            delay = max(15, _planes["interval"])
+            delay = 5
         await asyncio.sleep(delay)
 
 

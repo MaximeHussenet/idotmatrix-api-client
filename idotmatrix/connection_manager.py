@@ -55,6 +55,7 @@ class ConnectionManager:
         self._reconnect_loop_task: Optional[Task] = None
 
         self._ble_packet_size = None
+        self._response_read_supported = None  # None = unknown, False = device forbids it
 
         self._connection_listeners: List[ConnectionListener] = []
 
@@ -286,19 +287,23 @@ class ConnectionManager:
                     data=ble_paket,
                     response=response,
                 )
-            if response:
+            if response and self._response_read_supported is not False:
                 try:
                     response_data = await self.client.read_gatt_char(UUID_READ_DATA)
+                    self._response_read_supported = True
                     self.logging.debug(f"received response data: {response_data}")
                 except BleakDBusError as e:
                     if e.dbus_error == "org.bluez.Error.NotPermitted":
-                        pass
+                        self._response_read_supported = False
                     else:
                         self.logging.error(f"error while reading response data: {e}")
                 except Exception as e:
-                    # some devices don't permit reading the response
-                    # characteristic at all — not an error for the upload
-                    self.logging.debug(f"could not read response data: {e}")
+                    # Some devices forbid reading the response characteristic
+                    # entirely ("Read Not Permitted"). Remember that and stop
+                    # asking: every rejected read is a wasted ATT round-trip
+                    # per 4K chunk on an already busy link.
+                    self._response_read_supported = False
+                    self.logging.debug(f"response reads disabled: {e}")
 
     async def get_max_bytes_per_chunk(self, response: bool) -> int:
         if response:
