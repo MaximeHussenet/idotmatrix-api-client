@@ -857,7 +857,7 @@ async def _photos_autostart():
 
 # ---------------------------------------------------------------- spotify mode
 
-_spotify = {"mode": None, "task": None, "poll": 3, "repush": 15}
+_spotify = {"mode": None, "task": None, "poll": 3, "repush": 5}
 
 
 class SpotifyStartBody(BaseModel):
@@ -871,8 +871,12 @@ async def _spotify_loop():
     while True:
         try:
             changed = await asyncio.to_thread(mode.poll)
-            due = time.time() - last_push >= _spotify["repush"]
-            if changed or (mode.state == "playing" and due):
+            # The panel occasionally swallows an upload (BLE transfer succeeds
+            # but it keeps showing the previous GIF), so never push a state
+            # exactly once: playing refreshes the progress bar every repush_s,
+            # paused/idle re-push slowly so a dropped frame self-heals.
+            interval = {"playing": _spotify["repush"], "paused": 20}.get(mode.state, 60)
+            if changed or time.time() - last_push >= interval:
                 frame = await asyncio.to_thread(mode.render)
                 await _push_pil_image(frame, timeout=120)
                 last_push = time.time()
@@ -893,7 +897,7 @@ async def spotify_start(body: SpotifyStartBody = Body(default=SpotifyStartBody()
     from nowplaying import NowPlaying
 
     poll_s = body.poll_s if body.poll_s is not None else 3
-    repush_s = body.repush_s if body.repush_s is not None else 15
+    repush_s = body.repush_s if body.repush_s is not None else 5
     if not 1 <= poll_s <= 60 or not 5 <= repush_s <= 300:
         raise HTTPException(422, "poll_s must be 1-60, repush_s 5-300")
     task = _spotify["task"]
@@ -986,7 +990,7 @@ async def _saver_loop():
 async def saver_start(body: SaverStartBody = Body(default=SaverStartBody())):
     from saver import STYLES, Saver
 
-    style = body.style or "pipes"
+    style = body.style or "snake"
     cycle_s = body.cycle_s if body.cycle_s is not None else 240
     frames = body.frames if body.frames is not None else 40
     frame_ms = body.frame_ms if body.frame_ms is not None else 150

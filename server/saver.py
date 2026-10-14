@@ -6,7 +6,8 @@ traffic between refreshes. A fresh animation is generated and pushed every
 cycle (default every few minutes) so it never gets stale.
 
 Styles:
-  pipes    — the classic: colored pipes random-walking across the screen
+  snake    — a wandering snake that paints a hue-shifting trail; it prefers
+             unexplored cells but sometimes eats previously lit trail
   life     — Conway's Game of Life from a random soup, cells colored by age
   mystify  — bouncing polygons with fading trails (Win98 "Mystify Your Mind")
 """
@@ -22,12 +23,7 @@ from PIL import Image, ImageDraw
 log = logging.getLogger("saver")
 
 SIZE = 64
-STYLES = ("pipes", "life", "mystify")
-
-PIPE_COLORS = [
-    (230, 60, 50), (60, 190, 70), (70, 120, 240), (240, 200, 40),
-    (200, 80, 220), (60, 210, 210), (240, 140, 40),
-]
+STYLES = ("snake", "life", "mystify")
 
 
 def _gif_bytes(frames: list[Image.Image], frame_ms: int) -> bytes:
@@ -39,28 +35,50 @@ def _gif_bytes(frames: list[Image.Image], frame_ms: int) -> bytes:
 
 # ------------------------------------------------------------------ styles
 
-def _pipes_frames(n: int) -> list[Image.Image]:
-    canvas = Image.new("RGB", (SIZE, SIZE))
-    draw = ImageDraw.Draw(canvas)
-    dirs = [(0, -1), (0, 1), (-1, 0), (1, 0)]
-    x, y = random.randrange(SIZE), random.randrange(SIZE)
-    dx, dy = random.choice(dirs)
-    color = random.choice(PIPE_COLORS)
+def _snake_frames(n: int) -> list[Image.Image]:
+    """Wandering snake painting a hue-shifting trail. Direction choice is
+    weighted: strong preference for unlit cells, but previously lit trail can
+    be entered and "eaten" (the cell goes dark again), so the canvas keeps
+    churning instead of filling up."""
+    lit: dict[tuple[int, int], tuple[int, int, int]] = {}
+    x, y = SIZE // 2, SIZE // 2
+    dx, dy = random.choice([(0, -1), (0, 1), (-1, 0), (1, 0)])
+    hue = random.random()
     frames = []
     for _ in range(n):
-        for _ in range(10):  # steps per frame
-            if random.random() < 0.22:  # elbow: turn 90°, mark the joint
-                draw.point((x, y), fill=tuple(min(255, c + 70) for c in color))
-                dx, dy = random.choice([(dy, dx), (-dy, -dx)])
-            nx, ny = x + dx, y + dy
-            if not (0 <= nx < SIZE and 0 <= ny < SIZE):  # hit a wall: new pipe
-                x, y = random.randrange(SIZE), random.randrange(SIZE)
-                dx, dy = random.choice(dirs)
-                color = random.choice(PIPE_COLORS)
+        for _ in range(12):  # steps per frame
+            hue = (hue + 0.0025) % 1.0
+            # candidates: straight, left, right (never reverse)
+            options = []
+            for cdx, cdy in ((dx, dy), (dy, -dx), (-dy, dx)):
+                nx, ny = x + cdx, y + cdy
+                if not (0 <= nx < SIZE and 0 <= ny < SIZE):
+                    continue
+                weight = 1.0 if (nx, ny) not in lit else 0.15
+                if (cdx, cdy) == (dx, dy):
+                    weight *= 2.5  # momentum: mostly keep going straight
+                options.append(((cdx, cdy), weight))
+            if not options:  # cornered: turn around
+                dx, dy = -dx, -dy
                 continue
-            x, y = nx, ny
-            draw.point((x, y), fill=color)
-        frames.append(canvas.copy())
+            total = sum(w for _, w in options)
+            pick = random.uniform(0, total)
+            for (cdx, cdy), w in options:
+                pick -= w
+                if pick <= 0:
+                    dx, dy = cdx, cdy
+                    break
+            x, y = x + dx, y + dy
+            if (x, y) in lit:
+                del lit[(x, y)]  # eat the old trail
+            else:
+                rgb = colorsys.hsv_to_rgb(hue, 0.85, 0.75)
+                lit[(x, y)] = tuple(round(c * 255) for c in rgb)
+        img = Image.new("RGB", (SIZE, SIZE))
+        for pos, color in lit.items():
+            img.putpixel(pos, color)
+        img.putpixel((x, y), (255, 255, 255))  # head
+        frames.append(img)
     return frames
 
 
@@ -134,11 +152,11 @@ def _mystify_frames(n: int) -> list[Image.Image]:
     return frames
 
 
-_GENERATORS = {"pipes": _pipes_frames, "life": _life_frames, "mystify": _mystify_frames}
+_GENERATORS = {"snake": _snake_frames, "life": _life_frames, "mystify": _mystify_frames}
 
 
 class Saver:
-    def __init__(self, style: str = "pipes", frames: int = 40, frame_ms: int = 150) -> None:
+    def __init__(self, style: str = "snake", frames: int = 40, frame_ms: int = 150) -> None:
         if style not in STYLES:
             raise ValueError(f"style must be one of {STYLES}")
         self.style = style
